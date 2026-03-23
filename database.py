@@ -276,15 +276,19 @@ class Database:
                 INSERT INTO tournaments (name, format, chat_id, created_by, 
                                        max_players, min_players, deadline_days, groups_count)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
             ''', (name, format, chat_id, created_by, max_players, min_players, deadline_days, groups_count))
+            result = self.cursor.fetchone()
+            self._conn.commit()
+            return result[0]
         else:
             self.cursor.execute('''
                 INSERT INTO tournaments (name, format, chat_id, created_by, 
                                        max_players, min_players, deadline_days, groups_count)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (name, format, chat_id, created_by, max_players, min_players, deadline_days, groups_count))
-        self._conn.commit()
-        return self.cursor.lastrowid
+            self._conn.commit()
+            return self.cursor.lastrowid
     
     def get_tournament(self, tournament_id: int) -> Optional[Dict]:
         if self.is_postgres:
@@ -602,14 +606,18 @@ class Database:
             self.cursor.execute('''
                 INSERT INTO matches (tournament_id, player1_id, player2_id, round_num)
                 VALUES (%s, %s, %s, %s)
+                RETURNING id
             ''', (tournament_id, player1_id, player2_id, round_num))
+            result = self.cursor.fetchone()
+            self._conn.commit()
+            return result[0]
         else:
             self.cursor.execute('''
                 INSERT INTO matches (tournament_id, player1_id, player2_id, round_num)
                 VALUES (?, ?, ?, ?)
             ''', (tournament_id, player1_id, player2_id, round_num))
-        self._conn.commit()
-        return self.cursor.lastrowid
+            self._conn.commit()
+            return self.cursor.lastrowid
     
     def update_player_stats(self, user_id: int, result: str, goals_scored: int, 
                            goals_conceded: int, rating_change: int):
