@@ -14,18 +14,61 @@ logger = logging.getLogger(__name__)
 class Database:
     def __init__(self, db_path: str = "tournament_bot.db"):
         self.db_path = db_path
-        self.is_postgres = bool(os.getenv("DATABASE_URL"))
-        
+        database_url = os.getenv("DATABASE_URL")
+        self.is_postgres = bool(database_url)
+
         if self.is_postgres:
-            import psycopg2
-            from psycopg2.extras import RealDictCursor
-            self._conn = psycopg2.connect(os.getenv("DATABASE_URL"), cursor_factory=RealDictCursor)
-            self._dict_conn = True
-            logger.info("Using PostgreSQL database")
+            self._connect_postgres(database_url)
         else:
             self._conn = sqlite3.connect(db_path, check_same_thread=False)
             self._dict_conn = False
             logger.info(f"Using SQLite database: {db_path}")
+
+    def _connect_postgres(self, database_url: str):
+        """Connect to PostgreSQL, adding sslmode=require for Railway if not already set."""
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+        except ImportError as e:
+            logger.critical(
+                "psycopg2 is not installed but DATABASE_URL is set. "
+                "Add psycopg2-binary to requirements.txt."
+            )
+            raise RuntimeError(
+                "psycopg2 is required when DATABASE_URL is set"
+            ) from e
+
+        # Ensure sslmode=require is present for Railway's PostgreSQL.
+        # Append only if no sslmode is already specified in the URL.
+        if "sslmode=" not in database_url:
+            separator = "&" if "?" in database_url else "?"
+            connect_url = f"{database_url}{separator}sslmode=require"
+        else:
+            connect_url = database_url
+
+        logger.info("Connecting to PostgreSQL (DATABASE_URL is set)...")
+        try:
+            self._conn = psycopg2.connect(connect_url, cursor_factory=RealDictCursor)
+            self._conn.autocommit = False
+            # Verify the connection is actually alive
+            with self._conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            self._dict_conn = True
+            logger.info("PostgreSQL connection established successfully.")
+        except psycopg2.OperationalError as e:
+            logger.critical(
+                "Failed to connect to PostgreSQL. "
+                "DATABASE_URL is set but the connection could not be established. "
+                "Check that the DATABASE_URL is correct, the database is reachable, "
+                "and SSL is configured properly. Error: %s",
+                e,
+            )
+            raise
+        except Exception as e:
+            logger.critical(
+                "Unexpected error while connecting to PostgreSQL: %s", e
+            )
+            raise
     
     @property
     def cursor(self):
