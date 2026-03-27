@@ -45,10 +45,7 @@ class Database:
 
         logger.info("Connecting to PostgreSQL...")
         try:
-            self._conn = psycopg2.connect(connect_url, cursor_factory=RealDictCursor)
-            self._conn.autocommit = False
-            with self._conn.cursor() as cur:
-                cur.execute("SELECT 1")
+            self._conn = psycopg2.connect(connect_url)
             self._dict_conn = True
             logger.info("PostgreSQL connection established.")
         except Exception as e:
@@ -564,6 +561,9 @@ class Database:
                 self.cursor.execute('DELETE FROM group_standings')
             else:
                 self.cursor.execute('DELETE FROM group_standings')
+        self._conn.commit()
+    
+    def commit(self):
         self._conn.commit()
     
     def close(self):

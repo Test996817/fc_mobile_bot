@@ -490,7 +490,7 @@ class UniverseHeroesBot:
         
         self.db.cursor.execute('DELETE FROM players')
         self.db.cursor.execute('DELETE FROM elo')
-        self.db._conn.commit()
+        self.db.commit()
         
         await update.message.reply_text("Players and ELO cleared from database!")
     
