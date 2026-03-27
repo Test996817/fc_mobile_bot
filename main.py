@@ -69,6 +69,10 @@ class UniverseHeroesBot:
             self.cmd_set_nick
         ))
         self.application.add_handler(MessageHandler(
+            filters.Regex(r'^!commands'), 
+            self.cmd_commands
+        ))
+        self.application.add_handler(MessageHandler(
             filters.Regex(r'^!profile'), 
             self.cmd_profile
         ))
@@ -484,6 +488,23 @@ class UniverseHeroesBot:
             "!matches [nick] - my matches\n"
             "/elo - ELO table\n"
             "/standings [A/B/C/D] - group table\n\n"
+            "Send screenshot with caption:\n"
+            "@Player1 - @Player2"
+        )
+        await update.message.reply_text(text)
+    
+    async def cmd_commands(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        text = (
+            "UNIVERSE OF HEROES - Commands\n\n"
+            "Player:\n"
+            "!nick [nick] - set your gaming nick\n"
+            "!matches [nick] - view your matches\n"
+            "!profile - view profile\n\n"
+            "Public:\n"
+            "/elo - ELO rating table\n"
+            "/standings [A/B/C/D] - group standings\n"
+            "/help - show this help\n\n"
+            "Results:\n"
             "Send screenshot with caption:\n"
             "@Player1 - @Player2"
         )
