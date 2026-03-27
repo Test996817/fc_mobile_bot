@@ -1,0 +1,10 @@
+{
+  "build": {
+    "builder": "NIXPACKS"
+  },
+  "deploy": {
+    "startCommand": "pip install -r requirements.txt && python main.py",
+    "healthcheckPath": "/",
+    "healthcheckInterval": 30
+  }
+}
