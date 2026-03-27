@@ -26,6 +26,7 @@ class Database:
             self._dict_conn = False
             logger.info(f"Using SQLite database: {db_path}")
         
+        self._cursor = self._conn.cursor()
         self.create_tables()
 
     def _connect_postgres(self, database_url: str):
@@ -56,7 +57,7 @@ class Database:
     
     @property
     def cursor(self):
-        return self._conn.cursor()
+        return self._cursor
     
     def create_tables(self):
         if self.is_postgres:
