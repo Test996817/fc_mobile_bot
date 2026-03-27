@@ -91,6 +91,7 @@ class UniverseHeroesBot:
         self.application.add_handler(CommandHandler("cancelmatch", self.cmd_cancel_match))
         self.application.add_handler(CommandHandler("group", self.cmd_group))
         self.application.add_handler(CommandHandler("initplayers", self.cmd_init_players))
+        self.application.add_handler(CommandHandler("clearplayers", self.cmd_clear_players))
         
         self.application.add_handler(MessageHandler(
             filters.Regex(r'^!nick\s+(\S.+)'), 
@@ -482,6 +483,16 @@ class UniverseHeroesBot:
                     total_added += 1
         
         await update.message.reply_text(f"Added {total_added} players to database!")
+    
+    async def cmd_clear_players(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            return
+        
+        self.db.cursor.execute('DELETE FROM players')
+        self.db.cursor.execute('DELETE FROM elo')
+        self.db._conn.commit()
+        
+        await update.message.reply_text("Players and ELO cleared from database!")
     
     async def cmd_set_nick(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         match = re.match(r'^!nick\s+(\S.+)', update.message.text)
