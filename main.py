@@ -323,16 +323,16 @@ class UniverseHeroesBot:
             return
         
         text = f"📊 {group_name}\n\n"
-        text += "┌────┬──────────────────────┬────┬────┬────┬────┬────┬────────┐\n"
-        text += "│ #  │ Ник                  │ И  │ В  │ П  │ Н  │ О  │ Голы   │\n"
-        text += "├────┼──────────────────────┼────┼────┼────┼────┼────┼────────┤\n"
+        text += "```\n"
+        text += f"{'#':<3} {'Ник':<20} {'И':>2} {'В':>2} {'П':>2} {'Н':>2} {'О':>2} {'Голы':>8}\n"
+        text += "-" * 50 + "\n"
         
         for i, p in enumerate(standings, 1):
-            nick = p['player_nick'][:20].ljust(20)
+            nick = p['player_nick'][:18]
             goals = f"{p['goals_scored']}-{p['goals_conceded']}"
-            text += f"│{i:>2}. │ {nick} │{p['games']:>2} │{p['wins']:>2} │{p['losses']:>2} │{p['draws']:>2} │{p['points']:>2} │ {goals:<6} │\n"
+            text += f"{i:<3} {nick:<20} {p['games']:>2} {p['wins']:>2} {p['losses']:>2} {p['draws']:>2} {p['points']:>2} {goals:>8}\n"
         
-        text += "└────┴──────────────────────┴────┴────┴────┴────┴────┴────────┘"
+        text += "```"
         
         await update.message.reply_text(text)
     
