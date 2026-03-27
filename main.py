@@ -279,7 +279,7 @@ class UniverseHeroesBot:
         text += "Best of 5: need 3 wins to advance"
         return text
     
-    async def send_to_topic(self, update: Update, context: ContextTypes.DEFAULT_TYPE, topic_name: str, text: str):
+    async def send_to_topic(self, update: Update, context: ContextTypes.DEFAULT_TYPE, topic_name: str, text: str, parse_mode: str = None):
         try:
             chat_id = update.effective_chat.id
             forum_topics = await context.bot.get_forum_topics(chat_id)
@@ -294,7 +294,8 @@ class UniverseHeroesBot:
                 msg = await context.bot.send_message(
                     chat_id=chat_id,
                     message_thread_id=topic_id,
-                    text=text
+                    text=text,
+                    parse_mode=parse_mode
                 )
                 return msg
             else:
@@ -323,6 +324,7 @@ class UniverseHeroesBot:
             return
         
         text = f"📊 {group_name}\n\n"
+        text += "<pre>\n"
         text += f"{'#':<4}{'Ник':<22}{'И':>2} {'В':>2} {'П':>2} {'Н':>2} {'О':>3} {'Голы':>6}\n"
         text += "─" * 50 + "\n"
         
@@ -330,6 +332,8 @@ class UniverseHeroesBot:
             nick = p['player_nick'][:20]
             goals = f"{p['goals_scored']}-{p['goals_conceded']}"
             text += f"{i:<4}{nick:<22}{p['games']:>2} {p['wins']:>2} {p['losses']:>2} {p['draws']:>2} {p['points']:>3} {goals:>6}\n"
+        
+        text += "</pre>"
         
         await update.message.reply_text(text, parse_mode='HTML')
     
@@ -467,6 +471,7 @@ class UniverseHeroesBot:
             return
         
         text = f"📊 {group_name}\n\n"
+        text += "<pre>\n"
         text += f"{'#':<4}{'Ник':<22}{'И':>2} {'В':>2} {'П':>2} {'Н':>2} {'О':>3} {'Голы':>6}\n"
         text += "─" * 50 + "\n"
         
@@ -475,8 +480,10 @@ class UniverseHeroesBot:
             goals = f"{p['goals_scored']}-{p['goals_conceded']}"
             text += f"{i:<4}{nick:<22}{p['games']:>2} {p['wins']:>2} {p['losses']:>2} {p['draws']:>2} {p['points']:>3} {goals:>6}\n"
         
+        text += "</pre>"
+        
         topic_name = GROUPS_CONFIG[group_key]['topic_name']
-        await self.send_to_topic(update, context, topic_name, text)
+        await self.send_to_topic(update, context, topic_name, text, parse_mode='HTML')
     
     async def cmd_init_players(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
