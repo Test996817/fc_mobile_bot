@@ -331,7 +331,7 @@ class UniverseHeroesBot:
             goals = f"{p['goals_scored']}-{p['goals_conceded']}"
             text += f"{i:<4}{nick:<22}{p['games']:>2} {p['wins']:>2} {p['losses']:>2} {p['draws']:>2} {p['points']:>3} {goals:>6}\n"
         
-        await update.message.reply_text(text)
+        await update.message.reply_text(text, parse_mode='HTML')
     
     async def cmd_elo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         elo_table = self.db.get_elo_table(50)
@@ -340,12 +340,18 @@ class UniverseHeroesBot:
             await update.message.reply_text("ELO table is empty.")
             return
         
-        text = "ELO Rating Table:\n\n"
+        text = "🏆 ELO Рейтинг:\n\n"
+        text += "<pre>\n"
+        text += f"{'#':<3} {'Ник':<20} {'ELO':>6}\n"
+        text += "─" * 32 + "\n"
         
         for i, p in enumerate(elo_table, 1):
-            text += f"{i}. {p['player_nick']} {p['rating']}\n"
+            nick = p['player_nick'][:18]
+            text += f"{i:<3} {nick:<20} {p['rating']:>6}\n"
         
-        await update.message.reply_text(text)
+        text += "</pre>"
+        
+        await update.message.reply_text(text, parse_mode='HTML')
     
     async def cmd_tech_loss(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
@@ -460,14 +466,14 @@ class UniverseHeroesBot:
             await update.message.reply_text(f"Table for {group_name} is empty.")
             return
         
-        text = f"{group_name}\n"
-        text += "-" * 40 + "\n"
-        text += f"{'#':<3} {'Nick':<20} {'G':>2} {'W':>2} {'L':>2} {'D':>2} {'Pts':>3} {'Goals':>8}\n"
-        text += "-" * 40 + "\n"
+        text = f"📊 {group_name}\n\n"
+        text += f"{'#':<4}{'Ник':<22}{'И':>2} {'В':>2} {'П':>2} {'Н':>2} {'О':>3} {'Голы':>6}\n"
+        text += "─" * 50 + "\n"
         
         for i, p in enumerate(standings, 1):
+            nick = p['player_nick'][:20]
             goals = f"{p['goals_scored']}-{p['goals_conceded']}"
-            text += f"{i:<3} {p['player_nick']:<20} {p['games']:>2} {p['wins']:>2} {p['losses']:>2} {p['draws']:>2} {p['points']:>3} {goals:>8}\n"
+            text += f"{i:<4}{nick:<22}{p['games']:>2} {p['wins']:>2} {p['losses']:>2} {p['draws']:>2} {p['points']:>3} {goals:>6}\n"
         
         topic_name = GROUPS_CONFIG[group_key]['topic_name']
         await self.send_to_topic(update, context, topic_name, text)
