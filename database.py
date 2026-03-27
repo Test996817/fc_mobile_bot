@@ -11,6 +11,13 @@ from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except ImportError:
+    psycopg2 = None
+    RealDictCursor = None
+
 
 class Database:
     def __init__(self, db_path: str = "universe_heroes.db"):
@@ -24,9 +31,9 @@ class Database:
             self._conn = sqlite3.connect(db_path, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
             self._dict_conn = False
+            self._cursor = self._conn.cursor()
             logger.info(f"Using SQLite database: {db_path}")
         
-        self._cursor = self._conn.cursor()
         self.create_tables()
 
     def _connect_postgres(self, database_url: str):
@@ -45,8 +52,10 @@ class Database:
 
         logger.info("Connecting to PostgreSQL...")
         try:
-            self._conn = psycopg2.connect(connect_url)
+            self._pg_conn = psycopg2.connect(connect_url)
+            self._cursor = self._pg_conn.cursor(cursor_factory=RealDictCursor)
             self._dict_conn = True
+            self._conn = self._pg_conn  # For compatibility
             logger.info("PostgreSQL connection established.")
         except Exception as e:
             logger.critical(f"Failed to connect to PostgreSQL: {e}")
@@ -55,6 +64,19 @@ class Database:
     @property
     def cursor(self):
         return self._cursor
+    
+    def commit(self):
+        if self.is_postgres and hasattr(self, '_pg_conn'):
+            self._pg_conn.commit()
+        else:
+            self._conn.commit()
+    
+    def _row_to_dict(self, row):
+        if row is None:
+            return None
+        if hasattr(row, 'keys'):
+            return dict(row)
+        return dict(row)
     
     def create_tables(self):
         if self.is_postgres:
@@ -253,14 +275,14 @@ class Database:
         else:
             self.cursor.execute('SELECT * FROM players WHERE nick = ?', (nick,))
         row = self.cursor.fetchone()
-        return dict(row) if row else None
+        return self._row_to_dict(row)
     
     def get_all_active_players(self) -> List[Dict]:
         if self.is_postgres:
             self.cursor.execute('SELECT * FROM players WHERE is_active = 1 ORDER BY nick')
         else:
             self.cursor.execute('SELECT * FROM players WHERE is_active = 1 ORDER BY nick')
-        return [dict(row) for row in self.cursor.fetchall()]
+        return [self._row_to_dict(row) for row in self.cursor.fetchall()]
     
     def deactivate_player(self, old_nick: str) -> bool:
         try:
@@ -302,7 +324,7 @@ class Database:
         else:
             self.cursor.execute('SELECT * FROM elo WHERE player_nick = ?', (nick,))
         row = self.cursor.fetchone()
-        return dict(row) if row else None
+        return self._row_to_dict(row)
     
     def update_elo(self, nick: str, rating_change: int, result: str, goals_scored: int, goals_conceded: int):
         if self.is_postgres:
@@ -337,7 +359,7 @@ class Database:
             self.cursor.execute('SELECT * FROM elo ORDER BY rating DESC LIMIT %s', (limit,))
         else:
             self.cursor.execute('SELECT * FROM elo ORDER BY rating DESC LIMIT ?', (limit,))
-        return [dict(row) for row in self.cursor.fetchall()]
+        return [self._row_to_dict(row) for row in self.cursor.fetchall()]
     
     def get_group_standings(self, group_name: str) -> List[Dict]:
         if self.is_postgres:
@@ -350,7 +372,7 @@ class Database:
                 SELECT * FROM group_standings WHERE group_name = ?
                 ORDER BY points DESC, goal_diff DESC, avg_goals DESC, goals_scored DESC
             ''', (group_name,))
-        return [dict(row) for row in self.cursor.fetchall()]
+        return [self._row_to_dict(row) for row in self.cursor.fetchall()]
     
     def update_group_standings(self, nick: str, group_name: str):
         matches = self.get_group_matches(nick, group_name, status='completed')
@@ -424,7 +446,7 @@ class Database:
             query += " ORDER BY round_num, match_num"
             self.cursor.execute(query, params if params else [])
         
-        return [dict(row) for row in self.cursor.fetchall()]
+        return [self._row_to_dict(row) for row in self.cursor.fetchall()]
     
     def add_group_match(self, group_name: str, player1: str, player2: str, round_num: int, match_num: int, player1_home: int) -> int:
         if self.is_postgres:
