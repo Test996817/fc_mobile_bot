@@ -1,6 +1,6 @@
 """
-Универсальный адаптер базы данных
-Автоматически выбирает: PostgreSQL (если DATABASE_URL) или SQLite
+UNIVERSE OF HEROES - Tournament Bot Database
+Supports PostgreSQL (Railway) and SQLite
 """
 
 import os
@@ -11,8 +11,9 @@ from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
+
 class Database:
-    def __init__(self, db_path: str = "tournament_bot.db"):
+    def __init__(self, db_path: str = "universe_heroes.db"):
         self.db_path = db_path
         database_url = os.getenv("DATABASE_URL")
         self.is_postgres = bool(database_url)
@@ -21,53 +22,36 @@ class Database:
             self._connect_postgres(database_url)
         else:
             self._conn = sqlite3.connect(db_path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
             self._dict_conn = False
             logger.info(f"Using SQLite database: {db_path}")
+        
+        self.create_tables()
 
     def _connect_postgres(self, database_url: str):
-        """Connect to PostgreSQL, adding sslmode=require for Railway if not already set."""
         try:
             import psycopg2
             from psycopg2.extras import RealDictCursor
         except ImportError as e:
-            logger.critical(
-                "psycopg2 is not installed but DATABASE_URL is set. "
-                "Add psycopg2-binary to requirements.txt."
-            )
-            raise RuntimeError(
-                "psycopg2 is required when DATABASE_URL is set"
-            ) from e
+            logger.critical("psycopg2 is not installed but DATABASE_URL is set.")
+            raise RuntimeError("psycopg2 is required when DATABASE_URL is set") from e
 
-        # Ensure sslmode=require is present for Railway's PostgreSQL.
-        # Append only if no sslmode is already specified in the URL.
         if "sslmode=" not in database_url:
             separator = "&" if "?" in database_url else "?"
             connect_url = f"{database_url}{separator}sslmode=require"
         else:
             connect_url = database_url
 
-        logger.info("Connecting to PostgreSQL (DATABASE_URL is set)...")
+        logger.info("Connecting to PostgreSQL...")
         try:
             self._conn = psycopg2.connect(connect_url, cursor_factory=RealDictCursor)
             self._conn.autocommit = False
-            # Verify the connection is actually alive
             with self._conn.cursor() as cur:
                 cur.execute("SELECT 1")
             self._dict_conn = True
-            logger.info("PostgreSQL connection established successfully.")
-        except psycopg2.OperationalError as e:
-            logger.critical(
-                "Failed to connect to PostgreSQL. "
-                "DATABASE_URL is set but the connection could not be established. "
-                "Check that the DATABASE_URL is correct, the database is reachable, "
-                "and SSL is configured properly. Error: %s",
-                e,
-            )
-            raise
+            logger.info("PostgreSQL connection established.")
         except Exception as e:
-            logger.critical(
-                "Unexpected error while connecting to PostgreSQL: %s", e
-            )
+            logger.critical(f"Failed to connect to PostgreSQL: {e}")
             raise
     
     @property
@@ -79,13 +63,21 @@ class Database:
             self._create_tables_postgres()
         else:
             self._create_tables_sqlite()
+        self._conn.commit()
     
     def _create_tables_sqlite(self):
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS players (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                ingame_nick TEXT,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nick TEXT UNIQUE NOT NULL,
+                is_active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS elo (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_nick TEXT UNIQUE NOT NULL,
                 rating INTEGER DEFAULT 1000,
                 wins INTEGER DEFAULT 0,
                 losses INTEGER DEFAULT 0,
@@ -95,73 +87,75 @@ class Database:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        
         self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS tournaments (
+            CREATE TABLE IF NOT EXISTS group_matches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                format TEXT NOT NULL,
-                max_players INTEGER,
-                min_players INTEGER DEFAULT 4,
-                chat_id INTEGER NOT NULL,
-                status TEXT DEFAULT 'registration',
-                deadline_days INTEGER DEFAULT 3,
-                current_round INTEGER DEFAULT 0,
-                groups_count INTEGER DEFAULT 0,
-                created_by INTEGER NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS tournament_players (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tournament_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                status TEXT DEFAULT 'pending',
-                group_name TEXT,
-                approved_by INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(tournament_id, user_id)
-            )
-        ''')
-        
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS matches (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tournament_id INTEGER NOT NULL,
-                player1_id INTEGER NOT NULL,
-                player2_id INTEGER NOT NULL,
+                group_name TEXT NOT NULL,
+                player1_nick TEXT NOT NULL,
+                player2_nick TEXT NOT NULL,
+                player1_home INTEGER DEFAULT 0,
+                round_num INTEGER DEFAULT 1,
+                match_num INTEGER DEFAULT 1,
                 player1_score INTEGER,
                 player2_score INTEGER,
-                winner_id INTEGER,
-                round_num INTEGER DEFAULT 1,
-                group_name TEXT,
-                match_type TEXT DEFAULT 'round',
                 status TEXT DEFAULT 'pending',
-                screenshot_id TEXT,
-                reported_by INTEGER,
-                reported_at TIMESTAMP,
-                deadline_at TIMESTAMP,
+                reported_by TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS group_standings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_name TEXT NOT NULL,
+                player_nick TEXT UNIQUE NOT NULL,
+                games INTEGER DEFAULT 0,
+                wins INTEGER DEFAULT 0,
+                losses INTEGER DEFAULT 0,
+                draws INTEGER DEFAULT 0,
+                points INTEGER DEFAULT 0,
+                goals_scored INTEGER DEFAULT 0,
+                goals_conceded INTEGER DEFAULT 0,
+                goal_diff INTEGER DEFAULT 0,
+                avg_goals REAL DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS playoff_matches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stage TEXT NOT NULL,
+                match_num INTEGER NOT NULL,
+                player1_nick TEXT,
+                player2_nick TEXT,
+                player1_wins INTEGER DEFAULT 0,
+                player2_wins INTEGER DEFAULT 0,
+                player1_goals INTEGER DEFAULT 0,
+                player2_goals INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'pending',
+                message_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS admins (
                 user_id INTEGER PRIMARY KEY,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        
-        self._conn.commit()
     
     def _create_tables_postgres(self):
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS players (
-                user_id BIGSERIAL PRIMARY KEY,
-                username TEXT,
-                ingame_nick TEXT,
+                id SERIAL PRIMARY KEY,
+                nick TEXT UNIQUE NOT NULL,
+                is_active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS elo (
+                id SERIAL PRIMARY KEY,
+                player_nick TEXT UNIQUE NOT NULL,
                 rating INTEGER DEFAULT 1000,
                 wins INTEGER DEFAULT 0,
                 losses INTEGER DEFAULT 0,
@@ -171,130 +165,61 @@ class Database:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        
         self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS tournaments (
+            CREATE TABLE IF NOT EXISTS group_matches (
                 id SERIAL PRIMARY KEY,
-                name TEXT NOT NULL,
-                format TEXT NOT NULL,
-                max_players INTEGER,
-                min_players INTEGER DEFAULT 4,
-                chat_id BIGINT NOT NULL,
-                status TEXT DEFAULT 'registration',
-                deadline_days INTEGER DEFAULT 3,
-                current_round INTEGER DEFAULT 0,
-                groups_count INTEGER DEFAULT 0,
-                created_by BIGINT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS tournament_players (
-                id SERIAL PRIMARY KEY,
-                tournament_id INTEGER NOT NULL,
-                user_id BIGINT NOT NULL,
-                status TEXT DEFAULT 'pending',
-                group_name TEXT,
-                approved_by BIGINT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(tournament_id, user_id)
-            )
-        ''')
-        
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS matches (
-                id SERIAL PRIMARY KEY,
-                tournament_id INTEGER NOT NULL,
-                player1_id BIGINT NOT NULL,
-                player2_id BIGINT NOT NULL,
+                group_name TEXT NOT NULL,
+                player1_nick TEXT NOT NULL,
+                player2_nick TEXT NOT NULL,
+                player1_home INTEGER DEFAULT 0,
+                round_num INTEGER DEFAULT 1,
+                match_num INTEGER DEFAULT 1,
                 player1_score INTEGER,
                 player2_score INTEGER,
-                winner_id BIGINT,
-                round_num INTEGER DEFAULT 1,
-                group_name TEXT,
-                match_type TEXT DEFAULT 'round',
                 status TEXT DEFAULT 'pending',
-                screenshot_id TEXT,
-                reported_by BIGINT,
-                reported_at TIMESTAMP,
-                deadline_at TIMESTAMP,
+                reported_by TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS group_standings (
+                id SERIAL PRIMARY KEY,
+                group_name TEXT NOT NULL,
+                player_nick TEXT UNIQUE NOT NULL,
+                games INTEGER DEFAULT 0,
+                wins INTEGER DEFAULT 0,
+                losses INTEGER DEFAULT 0,
+                draws INTEGER DEFAULT 0,
+                points INTEGER DEFAULT 0,
+                goals_scored INTEGER DEFAULT 0,
+                goals_conceded INTEGER DEFAULT 0,
+                goal_diff INTEGER DEFAULT 0,
+                avg_goals REAL DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS playoff_matches (
+                id SERIAL PRIMARY KEY,
+                stage TEXT NOT NULL,
+                match_num INTEGER NOT NULL,
+                player1_nick TEXT,
+                player2_nick TEXT,
+                player1_wins INTEGER DEFAULT 0,
+                player2_wins INTEGER DEFAULT 0,
+                player1_goals INTEGER DEFAULT 0,
+                player2_goals INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'pending',
+                message_id BIGINT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS admins (
                 user_id BIGSERIAL PRIMARY KEY,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        
-        self._conn.commit()
-    
-    def add_player(self, user_id: int, username: str, ingame_nick: str = None) -> bool:
-        try:
-            if self.is_postgres:
-                self.cursor.execute('''
-                    INSERT INTO players (user_id, username, ingame_nick)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (user_id) DO UPDATE SET
-                    username = EXCLUDED.username,
-                    ingame_nick = COALESCE(EXCLUDED.ingame_nick, players.ingame_nick)
-                ''', (user_id, username, ingame_nick))
-            else:
-                self.cursor.execute('''
-                    INSERT OR REPLACE INTO players (user_id, username, ingame_nick)
-                    VALUES (?, ?, ?)
-                ''', (user_id, username, ingame_nick))
-            self._conn.commit()
-            return True
-        except Exception as e:
-            logger.error(f"Error adding player: {e}")
-            return False
-    
-    def get_player(self, user_id: int) -> Optional[Dict]:
-        if self.is_postgres:
-            self.cursor.execute('SELECT * FROM players WHERE user_id = %s', (user_id,))
-            row = self.cursor.fetchone()
-            return dict(row) if row else None
-        else:
-            self.cursor.execute('SELECT * FROM players WHERE user_id = ?', (user_id,))
-            row = self.cursor.fetchone()
-            return self._row_to_player(row) if row else None
-    
-    def get_player_by_nick(self, ingame_nick: str) -> Optional[Dict]:
-        if self.is_postgres:
-            self.cursor.execute('SELECT * FROM players WHERE ingame_nick = %s', (ingame_nick,))
-            row = self.cursor.fetchone()
-            return dict(row) if row else None
-        else:
-            self.cursor.execute('SELECT * FROM players WHERE ingame_nick = ?', (ingame_nick,))
-            row = self.cursor.fetchone()
-            return self._row_to_player(row) if row else None
-    
-    def _row_to_player(self, row) -> Dict:
-        return {
-            'user_id': row[0],
-            'username': row[1],
-            'ingame_nick': row[2],
-            'rating': row[3],
-            'wins': row[4],
-            'losses': row[5],
-            'draws': row[6],
-            'goals_scored': row[7],
-            'goals_conceded': row[8],
-            'created_at': row[9]
-        }
-    
-    def update_player_nick(self, user_id: int, ingame_nick: str):
-        if self.is_postgres:
-            self.cursor.execute('UPDATE players SET ingame_nick = %s WHERE user_id = %s', 
-                              (ingame_nick, user_id))
-        else:
-            self.cursor.execute('UPDATE players SET ingame_nick = ? WHERE user_id = ?', 
-                              (ingame_nick, user_id))
-        self._conn.commit()
     
     def add_admin(self, user_id: int):
         if self.is_postgres:
@@ -310,405 +235,335 @@ class Database:
             self.cursor.execute('SELECT 1 FROM admins WHERE user_id = ?', (user_id,))
         return self.cursor.fetchone() is not None
     
-    def create_tournament(self, name: str, format: str, chat_id: int, 
-                         created_by: int, max_players: int = None, 
-                         min_players: int = 4, deadline_days: int = 3,
-                         groups_count: int = 0) -> int:
-        if self.is_postgres:
-            self.cursor.execute('''
-                INSERT INTO tournaments (name, format, chat_id, created_by, 
-                                       max_players, min_players, deadline_days, groups_count)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
-            ''', (name, format, chat_id, created_by, max_players, min_players, deadline_days, groups_count))
-            result = self.cursor.fetchone()
-            self._conn.commit()
-            return result[0]
-        else:
-            self.cursor.execute('''
-                INSERT INTO tournaments (name, format, chat_id, created_by, 
-                                       max_players, min_players, deadline_days, groups_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (name, format, chat_id, created_by, max_players, min_players, deadline_days, groups_count))
-            self._conn.commit()
-            return self.cursor.lastrowid
-    
-    def get_tournament(self, tournament_id: int) -> Optional[Dict]:
-        if self.is_postgres:
-            self.cursor.execute('SELECT * FROM tournaments WHERE id = %s', (tournament_id,))
-            row = self.cursor.fetchone()
-            if row:
-                result = dict(row)
-                result['players'] = self.get_tournament_players(row['id'])
-                return result
-            return None
-        else:
-            self.cursor.execute('SELECT * FROM tournaments WHERE id = ?', (tournament_id,))
-            row = self.cursor.fetchone()
-            if row:
-                result = self._row_to_tournament(row)
-                result['players'] = self.get_tournament_players(row[0])
-                return result
-            return None
-    
-    def get_tournament_by_chat(self, chat_id: int) -> Optional[Dict]:
-        if self.is_postgres:
-            self.cursor.execute('''
-                SELECT * FROM tournaments 
-                WHERE chat_id = %s AND status = 'registration'
-                ORDER BY created_at DESC LIMIT 1
-            ''', (chat_id,))
-            row = self.cursor.fetchone()
-            if row:
-                result = dict(row)
-                result['players'] = self.get_tournament_players(row['id'])
-                return result
-            
-            self.cursor.execute('''
-                SELECT * FROM tournaments 
-                WHERE chat_id = %s AND status = 'in_progress'
-                ORDER BY created_at DESC LIMIT 1
-            ''', (chat_id,))
-            row = self.cursor.fetchone()
-            if row:
-                result = dict(row)
-                result['players'] = self.get_tournament_players(row['id'])
-                return result
-            return None
-        else:
-            self.cursor.execute('''
-                SELECT * FROM tournaments 
-                WHERE chat_id = ? AND status = 'registration'
-                ORDER BY created_at DESC LIMIT 1
-            ''', (chat_id,))
-            row = self.cursor.fetchone()
-            if row:
-                result = self._row_to_tournament(row)
-                result['players'] = self.get_tournament_players(row[0])
-                return result
-            
-            self.cursor.execute('''
-                SELECT * FROM tournaments 
-                WHERE chat_id = ? AND status = 'in_progress'
-                ORDER BY created_at DESC LIMIT 1
-            ''', (chat_id,))
-            row = self.cursor.fetchone()
-            if row:
-                result = self._row_to_tournament(row)
-                result['players'] = self.get_tournament_players(row[0])
-                return result
-            return None
-    
-    def _row_to_tournament(self, row) -> Dict:
-        return {
-            'id': row[0],
-            'name': row[1],
-            'format': row[2],
-            'max_players': row[3],
-            'min_players': row[4],
-            'chat_id': row[5],
-            'status': row[6],
-            'deadline_days': row[7],
-            'current_round': row[8],
-            'groups_count': row[9],
-            'created_by': row[10],
-            'players': []
-        }
-    
-    def update_tournament_status(self, tournament_id: int, status: str):
-        if self.is_postgres:
-            self.cursor.execute('UPDATE tournaments SET status = %s WHERE id = %s', 
-                              (status, tournament_id))
-        else:
-            self.cursor.execute('UPDATE tournaments SET status = ? WHERE id = ?', 
-                              (status, tournament_id))
-        self._conn.commit()
-    
-    def update_tournament_round(self, tournament_id: int, round_num: int):
-        if self.is_postgres:
-            self.cursor.execute('UPDATE tournaments SET current_round = %s WHERE id = %s', 
-                              (round_num, tournament_id))
-        else:
-            self.cursor.execute('UPDATE tournaments SET current_round = ? WHERE id = ?', 
-                              (round_num, tournament_id))
-        self._conn.commit()
-    
-    def get_tournament_players(self, tournament_id: int, status: str = None) -> List[Dict]:
-        if self.is_postgres:
-            query = '''
-                SELECT p.*, tp.status as tournament_status, tp.group_name 
-                FROM tournament_players tp
-                JOIN players p ON tp.user_id = p.user_id
-                WHERE tp.tournament_id = %s
-            '''
-            params = [tournament_id]
-            if status:
-                query += ' AND tp.status = %s'
-                params.append(status)
-            
-            self.cursor.execute(query, params)
-            players = []
-            for row in self.cursor.fetchall():
-                p = dict(row)
-                p['tournament_status'] = p.pop('tournament_status')
-                p['group_name'] = p.pop('group_name')
-                players.append(p)
-            return players
-        else:
-            query = '''
-                SELECT p.*, tp.status, tp.group_name 
-                FROM tournament_players tp
-                JOIN players p ON tp.user_id = p.user_id
-                WHERE tp.tournament_id = ?
-            '''
-            params = [tournament_id]
-            if status:
-                query += ' AND tp.status = ?'
-                params.append(status)
-            
-            self.cursor.execute(query, params)
-            players = []
-            for row in self.cursor.fetchall():
-                p = self._row_to_player(row[:10])
-                p['tournament_status'] = row[10]
-                p['group_name'] = row[11]
-                players.append(p)
-            return players
-    
-    def add_player_to_tournament(self, tournament_id: int, user_id: int, status: str = 'joined') -> bool:
+    def add_player(self, nick: str) -> bool:
         try:
             if self.is_postgres:
-                self.cursor.execute('''
-                    INSERT INTO tournament_players (tournament_id, user_id, status)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (tournament_id, user_id) DO UPDATE SET status = %s
-                ''', (tournament_id, user_id, status, status))
+                self.cursor.execute('INSERT INTO players (nick) VALUES (%s) ON CONFLICT DO NOTHING', (nick,))
+                self.cursor.execute('INSERT INTO elo (player_nick) VALUES (%s) ON CONFLICT DO NOTHING', (nick,))
             else:
-                self.cursor.execute('''
-                    INSERT OR REPLACE INTO tournament_players (tournament_id, user_id, status)
-                    VALUES (?, ?, ?)
-                ''', (tournament_id, user_id, status))
+                self.cursor.execute('INSERT OR IGNORE INTO players (nick) VALUES (?)', (nick,))
+                self.cursor.execute('INSERT OR IGNORE INTO elo (player_nick) VALUES (?)', (nick,))
             self._conn.commit()
             return True
         except Exception as e:
-            logger.error(f"Error adding player to tournament: {e}")
+            logger.error(f"Error adding player: {e}")
             return False
     
-    def get_player_tournament_status(self, tournament_id: int, user_id: int) -> Optional[Dict]:
+    def get_player(self, nick: str) -> Optional[Dict]:
         if self.is_postgres:
-            self.cursor.execute('''
-                SELECT p.*, tp.status as tournament_status, tp.group_name 
-                FROM tournament_players tp
-                JOIN players p ON tp.user_id = p.user_id
-                WHERE tp.tournament_id = %s AND tp.user_id = %s
-            ''', (tournament_id, user_id))
-            row = self.cursor.fetchone()
-            if row:
-                p = dict(row)
-                p['tournament_status'] = p.pop('tournament_status')
-                p['group_name'] = p.pop('group_name')
-                return p
-            return None
+            self.cursor.execute('SELECT * FROM players WHERE nick = %s', (nick,))
         else:
-            self.cursor.execute('''
-                SELECT p.*, tp.status, tp.group_name 
-                FROM tournament_players tp
-                JOIN players p ON tp.user_id = p.user_id
-                WHERE tp.tournament_id = ? AND tp.user_id = ?
-            ''', (tournament_id, user_id))
-            row = self.cursor.fetchone()
-            if row:
-                p = self._row_to_player(row[:10])
-                p['tournament_status'] = row[10]
-                p['group_name'] = row[11]
-                return p
-            return None
+            self.cursor.execute('SELECT * FROM players WHERE nick = ?', (nick,))
+        row = self.cursor.fetchone()
+        return dict(row) if row else None
     
-    def remove_player_from_tournament(self, tournament_id: int, user_id: int):
+    def get_all_active_players(self) -> List[Dict]:
         if self.is_postgres:
-            self.cursor.execute('''
-                DELETE FROM tournament_players WHERE tournament_id = %s AND user_id = %s
-            ''', (tournament_id, user_id))
+            self.cursor.execute('SELECT * FROM players WHERE is_active = 1 ORDER BY nick')
         else:
-            self.cursor.execute('''
-                DELETE FROM tournament_players WHERE tournament_id = ? AND user_id = ?
-            ''', (tournament_id, user_id))
-        self._conn.commit()
+            self.cursor.execute('SELECT * FROM players WHERE is_active = 1 ORDER BY nick')
+        return [dict(row) for row in self.cursor.fetchall()]
     
-    def update_tournament_player_status(self, tournament_id: int, user_id: int, 
-                                       status: str, approved_by: int = None):
-        if self.is_postgres:
-            self.cursor.execute('''
-                UPDATE tournament_players 
-                SET status = %s, approved_by = %s
-                WHERE tournament_id = %s AND user_id = %s
-            ''', (status, approved_by, tournament_id, user_id))
-        else:
-            self.cursor.execute('''
-                UPDATE tournament_players 
-                SET status = ?, approved_by = ?
-                WHERE tournament_id = ? AND user_id = ?
-            ''', (status, approved_by, tournament_id, user_id))
-        self._conn.commit()
-    
-    def update_match_result(self, match_id: int, score1: int, score2: int,
-                          winner_id: int, reported_by: int, screenshot_id: str = None):
-        if self.is_postgres:
-            self.cursor.execute('''
-                UPDATE matches SET 
-                player1_score = %s, player2_score = %s, winner_id = %s,
-                status = 'completed', reported_by = %s, screenshot_id = %s,
-                reported_at = CURRENT_TIMESTAMP
-                WHERE id = %s
-            ''', (score1, score2, winner_id, reported_by, screenshot_id, match_id))
-        else:
-            from datetime import datetime
-            self.cursor.execute('''
-                UPDATE matches SET 
-                player1_score = ?, player2_score = ?, winner_id = ?,
-                status = 'completed', reported_by = ?, screenshot_id = ?,
-                reported_at = ?
-                WHERE id = ?
-            ''', (score1, score2, winner_id, reported_by, screenshot_id, datetime.now(), match_id))
-        self._conn.commit()
-    
-    def find_match_between_players(self, tournament_id: int, user1_id: int, user2_id: int, 
-                                  status: str = 'pending') -> Optional[Dict]:
-        if self.is_postgres:
-            self.cursor.execute('''
-                SELECT * FROM matches 
-                WHERE tournament_id = %s 
-                AND status = %s
-                AND ((player1_id = %s AND player2_id = %s) OR (player1_id = %s AND player2_id = %s))
-                LIMIT 1
-            ''', (tournament_id, status, user1_id, user2_id, user2_id, user1_id))
-            row = self.cursor.fetchone()
-            return dict(row) if row else None
-        else:
-            self.cursor.execute('''
-                SELECT * FROM matches 
-                WHERE tournament_id = ? 
-                AND status = ?
-                AND ((player1_id = ? AND player2_id = ?) OR (player1_id = ? AND player2_id = ?))
-                LIMIT 1
-            ''', (tournament_id, status, user1_id, user2_id, user2_id, user1_id))
-            row = self.cursor.fetchone()
-            return self._row_to_match(row) if row else None
-    
-    def get_player_matches(self, user_id: int, tournament_id: int = None, 
-                          status: str = 'pending') -> List[Dict]:
-        if self.is_postgres:
-            query = 'SELECT * FROM matches WHERE (player1_id = %s OR player2_id = %s)'
-            params = [user_id, user_id]
-            if tournament_id:
-                query += ' AND tournament_id = %s'
-                params.append(tournament_id)
-            if status:
-                query += ' AND status = %s'
-                params.append(status)
-            query += ' ORDER BY created_at'
-            
-            self.cursor.execute(query, params)
-            return [dict(row) for row in self.cursor.fetchall()]
-        else:
-            query = 'SELECT * FROM matches WHERE (player1_id = ? OR player2_id = ?)'
-            params = [user_id, user_id]
-            if tournament_id:
-                query += ' AND tournament_id = ?'
-                params.append(tournament_id)
-            if status:
-                query += ' AND status = ?'
-                params.append(status)
-            
-            self.cursor.execute(query, params)
-            return [self._row_to_match(row) for row in self.cursor.fetchall()]
-    
-    def _row_to_match(self, row) -> Dict:
-        return {
-            'id': row[0],
-            'tournament_id': row[1],
-            'player1_id': row[2],
-            'player2_id': row[3],
-            'player1_score': row[4],
-            'player2_score': row[5],
-            'winner_id': row[6],
-            'round_num': row[7],
-            'group_name': row[8],
-            'match_type': row[9],
-            'status': row[10],
-            'screenshot_id': row[11],
-            'reported_by': row[12],
-            'reported_at': row[13],
-            'deadline_at': row[14],
-            'created_at': row[15]
-        }
-    
-    def create_match(self, tournament_id: int, player1_id: int, player2_id: int,
-                    round_num: int = 1) -> int:
-        if self.is_postgres:
-            self.cursor.execute('''
-                INSERT INTO matches (tournament_id, player1_id, player2_id, round_num)
-                VALUES (%s, %s, %s, %s)
-                RETURNING id
-            ''', (tournament_id, player1_id, player2_id, round_num))
-            result = self.cursor.fetchone()
+    def deactivate_player(self, old_nick: str) -> bool:
+        try:
+            if self.is_postgres:
+                self.cursor.execute('UPDATE players SET is_active = 0 WHERE nick = %s', (old_nick,))
+            else:
+                self.cursor.execute('UPDATE players SET is_active = 0 WHERE nick = ?', (old_nick,))
             self._conn.commit()
-            return result[0]
-        else:
-            self.cursor.execute('''
-                INSERT INTO matches (tournament_id, player1_id, player2_id, round_num)
-                VALUES (?, ?, ?, ?)
-            ''', (tournament_id, player1_id, player2_id, round_num))
-            self._conn.commit()
-            return self.cursor.lastrowid
+            return True
+        except Exception as e:
+            logger.error(f"Error deactivating player: {e}")
+            return False
     
-    def update_player_stats(self, user_id: int, result: str, goals_scored: int, 
-                           goals_conceded: int, rating_change: int):
+    def replace_player(self, old_nick: str, new_nick: str) -> bool:
+        try:
+            self.add_player(new_nick)
+            if self.is_postgres:
+                self.cursor.execute('UPDATE group_standings SET player_nick = %s WHERE player_nick = %s', (new_nick, old_nick))
+                self.cursor.execute('UPDATE group_matches SET player1_nick = %s WHERE player1_nick = %s', (new_nick, old_nick))
+                self.cursor.execute('UPDATE group_matches SET player2_nick = %s WHERE player2_nick = %s', (new_nick, old_nick))
+                self.cursor.execute('UPDATE playoff_matches SET player1_nick = %s WHERE player1_nick = %s', (new_nick, old_nick))
+                self.cursor.execute('UPDATE playoff_matches SET player2_nick = %s WHERE player2_nick = %s', (new_nick, old_nick))
+            else:
+                self.cursor.execute('UPDATE group_standings SET player_nick = ? WHERE player_nick = ?', (new_nick, old_nick))
+                self.cursor.execute('UPDATE group_matches SET player1_nick = ? WHERE player1_nick = ?', (new_nick, old_nick))
+                self.cursor.execute('UPDATE group_matches SET player2_nick = ? WHERE player2_nick = ?', (new_nick, old_nick))
+                self.cursor.execute('UPDATE playoff_matches SET player1_nick = ? WHERE player1_nick = ?', (new_nick, old_nick))
+                self.cursor.execute('UPDATE playoff_matches SET player2_nick = ? WHERE player2_nick = ?', (new_nick, old_nick))
+            self.deactivate_player(old_nick)
+            self._conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error replacing player: {e}")
+            return False
+    
+    def get_elo(self, nick: str) -> Optional[Dict]:
+        if self.is_postgres:
+            self.cursor.execute('SELECT * FROM elo WHERE player_nick = %s', (nick,))
+        else:
+            self.cursor.execute('SELECT * FROM elo WHERE player_nick = ?', (nick,))
+        row = self.cursor.fetchone()
+        return dict(row) if row else None
+    
+    def update_elo(self, nick: str, rating_change: int, result: str, goals_scored: int, goals_conceded: int):
         if self.is_postgres:
             self.cursor.execute('''
-                UPDATE players SET
+                UPDATE elo SET
                 rating = rating + %s,
                 wins = wins + CASE WHEN %s = 'win' THEN 1 ELSE 0 END,
                 losses = losses + CASE WHEN %s = 'loss' THEN 1 ELSE 0 END,
                 draws = draws + CASE WHEN %s = 'draw' THEN 1 ELSE 0 END,
                 goals_scored = goals_scored + %s,
                 goals_conceded = goals_conceded + %s
-                WHERE user_id = %s
-            ''', (rating_change, result, result, result, goals_scored, goals_conceded, user_id))
+                WHERE player_nick = %s
+            ''', (rating_change, result, result, result, goals_scored, goals_conceded, nick))
         else:
             wins_inc = 1 if result == 'win' else 0
             losses_inc = 1 if result == 'loss' else 0
             draws_inc = 1 if result == 'draw' else 0
-            
             self.cursor.execute('''
-                UPDATE players SET
+                UPDATE elo SET
                 rating = rating + ?,
                 wins = wins + ?,
                 losses = losses + ?,
                 draws = draws + ?,
                 goals_scored = goals_scored + ?,
                 goals_conceded = goals_conceded + ?
-                WHERE user_id = ?
-            ''', (rating_change, wins_inc, losses_inc, draws_inc, goals_scored, goals_conceded, user_id))
+                WHERE player_nick = ?
+            ''', (rating_change, wins_inc, losses_inc, draws_inc, goals_scored, goals_conceded, nick))
         self._conn.commit()
     
-    def get_top_players(self, limit: int = 20) -> List[Dict]:
+    def get_elo_table(self, limit: int = 50) -> List[Dict]:
+        if self.is_postgres:
+            self.cursor.execute('SELECT * FROM elo ORDER BY rating DESC LIMIT %s', (limit,))
+        else:
+            self.cursor.execute('SELECT * FROM elo ORDER BY rating DESC LIMIT ?', (limit,))
+        return [dict(row) for row in self.cursor.fetchall()]
+    
+    def get_group_standings(self, group_name: str) -> List[Dict]:
         if self.is_postgres:
             self.cursor.execute('''
-                SELECT * FROM players 
-                WHERE ingame_nick IS NOT NULL
-                ORDER BY rating DESC 
-                LIMIT %s
-            ''', (limit,))
-            return [dict(row) for row in self.cursor.fetchall()]
+                SELECT * FROM group_standings WHERE group_name = %s
+                ORDER BY points DESC, goal_diff DESC, avg_goals DESC, goals_scored DESC
+            ''', (group_name,))
         else:
             self.cursor.execute('''
-                SELECT * FROM players 
-                WHERE ingame_nick IS NOT NULL
-                ORDER BY rating DESC 
-                LIMIT ?
-            ''', (limit,))
-            return [self._row_to_player(row) for row in self.cursor.fetchall()]
+                SELECT * FROM group_standings WHERE group_name = ?
+                ORDER BY points DESC, goal_diff DESC, avg_goals DESC, goals_scored DESC
+            ''', (group_name,))
+        return [dict(row) for row in self.cursor.fetchall()]
+    
+    def update_group_standings(self, nick: str, group_name: str):
+        matches = self.get_group_matches(nick, group_name, status='completed')
+        games = len(matches)
+        wins = losses = draws = goals_scored = goals_conceded = 0
+        
+        for m in matches:
+            if m['player1_nick'] == nick:
+                goals_scored += m['player1_score'] or 0
+                goals_conceded += m['player2_score'] or 0
+                if m['player1_score'] > m['player2_score']:
+                    wins += 1
+                elif m['player1_score'] < m['player2_score']:
+                    losses += 1
+                else:
+                    draws += 1
+            else:
+                goals_scored += m['player2_score'] or 0
+                goals_conceded += m['player1_score'] or 0
+                if m['player2_score'] > m['player1_score']:
+                    wins += 1
+                elif m['player2_score'] < m['player1_score']:
+                    losses += 1
+                else:
+                    draws += 1
+        
+        points = wins * 3 + draws
+        goal_diff = goals_scored - goals_conceded
+        avg_goals = round(goals_scored / games, 2) if games > 0 else 0
+        
+        if self.is_postgres:
+            self.cursor.execute('''
+                INSERT INTO group_standings (group_name, player_nick, games, wins, losses, draws, 
+                    points, goals_scored, goals_conceded, goal_diff, avg_goals)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (player_nick) DO UPDATE SET
+                games = EXCLUDED.games, wins = EXCLUDED.wins, losses = EXCLUDED.losses,
+                draws = EXCLUDED.draws, points = EXCLUDED.points, goals_scored = EXCLUDED.goals_scored,
+                goals_conceded = EXCLUDED.goals_conceded, goal_diff = EXCLUDED.goal_diff,
+                avg_goals = EXCLUDED.avg_goals, updated_at = CURRENT_TIMESTAMP
+            ''', (group_name, nick, games, wins, losses, draws, points, goals_scored, goals_conceded, goal_diff, avg_goals))
+        else:
+            self.cursor.execute('''
+                INSERT OR REPLACE INTO group_standings 
+                (group_name, player_nick, games, wins, losses, draws, points, goals_scored, goals_conceded, goal_diff, avg_goals)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (group_name, nick, games, wins, losses, draws, points, goals_scored, goals_conceded, goal_diff, avg_goals))
+        self._conn.commit()
+    
+    def get_group_matches(self, nick: str = None, group_name: str = None, status: str = None) -> List[Dict]:
+        conditions = []
+        params = []
+        if nick:
+            conditions.append("(player1_nick = %s OR player2_nick = %s)")
+            params.extend([nick, nick])
+        if group_name:
+            conditions.append("group_name = %s")
+            params.append(group_name)
+        if status:
+            conditions.append("status = %s")
+            params.append(status)
+        
+        if self.is_postgres:
+            query = "SELECT * FROM group_matches"
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+            query += " ORDER BY round_num, match_num"
+            self.cursor.execute(query, params)
+        else:
+            query = "SELECT * FROM group_matches WHERE " + " AND ".join(conditions).replace('%s', '?') if conditions else "SELECT * FROM group_matches"
+            query += " ORDER BY round_num, match_num"
+            self.cursor.execute(query, params if params else [])
+        
+        return [dict(row) for row in self.cursor.fetchall()]
+    
+    def add_group_match(self, group_name: str, player1: str, player2: str, round_num: int, match_num: int, player1_home: int) -> int:
+        if self.is_postgres:
+            self.cursor.execute('''
+                INSERT INTO group_matches (group_name, player1_nick, player2_nick, round_num, match_num, player1_home)
+                VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
+            ''', (group_name, player1, player2, round_num, match_num, player1_home))
+            result = self.cursor.fetchone()
+            self._conn.commit()
+            return result[0]
+        else:
+            self.cursor.execute('''
+                INSERT INTO group_matches (group_name, player1_nick, player2_nick, round_num, match_num, player1_home)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (group_name, player1, player2, round_num, match_num, player1_home))
+            self._conn.commit()
+            return self.cursor.lastrowid
+    
+    def update_group_match_result(self, match_id: int, score1: int, score2: int, reported_by: str):
+        if self.is_postgres:
+            self.cursor.execute('''
+                UPDATE group_matches SET player1_score = %s, player2_score = %s, 
+                status = 'completed', reported_by = %s WHERE id = %s
+            ''', (score1, score2, reported_by, match_id))
+        else:
+            self.cursor.execute('''
+                UPDATE group_matches SET player1_score = ?, player2_score = ?,
+                status = 'completed', reported_by = ? WHERE id = ?
+            ''', (score1, score2, reported_by, match_id))
+        self._conn.commit()
+    
+    def cancel_group_match(self, match_id: int):
+        if self.is_postgres:
+            self.cursor.execute('DELETE FROM group_matches WHERE id = %s', (match_id,))
+        else:
+            self.cursor.execute('DELETE FROM group_matches WHERE id = ?', (match_id,))
+        self._conn.commit()
+    
+    def get_playoff_matches(self, stage: str = None) -> List[Dict]:
+        if self.is_postgres:
+            if stage:
+                self.cursor.execute('SELECT * FROM playoff_matches WHERE stage = %s ORDER BY match_num', (stage,))
+            else:
+                self.cursor.execute('SELECT * FROM playoff_matches ORDER BY match_num')
+        else:
+            if stage:
+                self.cursor.execute('SELECT * FROM playoff_matches WHERE stage = ? ORDER BY match_num', (stage,))
+            else:
+                self.cursor.execute('SELECT * FROM playoff_matches ORDER BY match_num')
+        
+        stages_order = ['1/8', '1/4', '1/2', 'final']
+        results = sorted([dict(row) for row in self.cursor.fetchall()], 
+                        key=lambda x: (stages_order.index(x['stage']), x['match_num']))
+        return results
+    
+    def add_playoff_match(self, stage: str, match_num: int, player1_nick: str = None, player2_nick: str = None) -> int:
+        if self.is_postgres:
+            self.cursor.execute('''
+                INSERT INTO playoff_matches (stage, match_num, player1_nick, player2_nick)
+                VALUES (%s, %s, %s, %s) RETURNING id
+            ''', (stage, match_num, player1_nick, player2_nick))
+            result = self.cursor.fetchone()
+            self._conn.commit()
+            return result[0]
+        else:
+            self.cursor.execute('''
+                INSERT INTO playoff_matches (stage, match_num, player1_nick, player2_nick)
+                VALUES (?, ?, ?, ?)
+            ''', (stage, match_num, player1_nick, player2_nick))
+            self._conn.commit()
+            return self.cursor.lastrowid
+    
+    def update_playoff_match(self, match_id: int, player1_wins: int = None, player2_wins: int = None,
+                           player1_goals: int = None, player2_goals: int = None,
+                           status: str = None, message_id: int = None):
+        updates = []
+        params = []
+        if player1_wins is not None:
+            updates.append("player1_wins = %s")
+            params.append(player1_wins)
+        if player2_wins is not None:
+            updates.append("player2_wins = %s")
+            params.append(player2_wins)
+        if player1_goals is not None:
+            updates.append("player1_goals = %s")
+            params.append(player1_goals)
+        if player2_goals is not None:
+            updates.append("player2_goals = %s")
+            params.append(player2_goals)
+        if status:
+            updates.append("status = %s")
+            params.append(status)
+        if message_id:
+            updates.append("message_id = %s")
+            params.append(message_id)
+        
+        if updates:
+            params.append(match_id)
+            if self.is_postgres:
+                query = f"UPDATE playoff_matches SET {', '.join(updates)} WHERE id = %s"
+            else:
+                query = f"UPDATE playoff_matches SET {', '.join(updates)} WHERE id = ?"
+            self.cursor.execute(query, params)
+            self._conn.commit()
+    
+    def clear_playoff_matches(self):
+        if self.is_postgres:
+            self.cursor.execute('DELETE FROM playoff_matches')
+        else:
+            self.cursor.execute('DELETE FROM playoff_matches')
+        self._conn.commit()
+    
+    def clear_group_matches(self, group_name: str = None):
+        if group_name:
+            if self.is_postgres:
+                self.cursor.execute('DELETE FROM group_matches WHERE group_name = %s', (group_name,))
+            else:
+                self.cursor.execute('DELETE FROM group_matches WHERE group_name = ?', (group_name,))
+        else:
+            if self.is_postgres:
+                self.cursor.execute('DELETE FROM group_matches')
+            else:
+                self.cursor.execute('DELETE FROM group_matches')
+        self._conn.commit()
+    
+    def clear_group_standings(self, group_name: str = None):
+        if group_name:
+            if self.is_postgres:
+                self.cursor.execute('DELETE FROM group_standings WHERE group_name = %s', (group_name,))
+            else:
+                self.cursor.execute('DELETE FROM group_standings WHERE group_name = ?', (group_name,))
+        else:
+            if self.is_postgres:
+                self.cursor.execute('DELETE FROM group_standings')
+            else:
+                self.cursor.execute('DELETE FROM group_standings')
+        self._conn.commit()
     
     def close(self):
         self._conn.close()
