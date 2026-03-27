@@ -42,6 +42,33 @@ GROUPS_CONFIG = {
 
 PLAYOFF_CONFIG = {'topic_name': 'ПЛЕЙ-ОФФ РЕЗУЛЬТАТЫ'}
 
+PLAYERS = {
+    'Группа A': [
+        'Tribalchief_OTC1', 'shtorm10', 'TrunksFC', 'Vadim260401',
+        'Danis1985_RM', 'PrincepsInferni_Flavoculus', 'yura192883', 'Annndreiii',
+        'vtrrgyg', 'GodFatherVSA', 'NotEterna1', 'legolas422', 'Vit88',
+        'visshera', 'YarcheeVsa', 'bad_606'
+    ],
+    'Группа B': [
+        'kaistroden', 'prostotip550', 'Andrey_17A', 'joeyhuichan',
+        'Dr_Wh11te', 'Yur4ik_1987', 'FcTaganrog', 'mihasik400',
+        'tricky938', 'ded1747n', 'shaut', 'likshonn',
+        'arnurchik17', 'alexmagenta', 'platonm09', 'Anatolyveniva4'
+    ],
+    'Группа C': [
+        'sp1r1tVSA', 'Arm032', 'KesarTM', 'arrowsgang',
+        'StrongMannVSA', 'reconquistaR9', 'zaali_916', 'dopolnitelb',
+        'Willamsfire', 'korzhiman98', 'prostomaksx', 'NNovitskiy',
+        'freezy_66', 'gatalskiy58', 'onvamnemihaaa', 'Serghe1KO'
+    ],
+    'Группа D': [
+        'RomaS93', 'Yerb0ll', 'artsmilex', 'Moes1k',
+        'Sergo1233', 'blancos_15', 'Azat72172', 'Vital0587',
+        'ShakhtarDonetsk56', 'ConstantinoXIII', 'shomashoma98', 'Frost_5454',
+        'KDI_BY', 'S_G_A_MVP', 'karbon0_0', 'Aleksei19811'
+    ]
+}
+
 
 class UniverseHeroesBot:
     def __init__(self, token: str):
@@ -63,6 +90,7 @@ class UniverseHeroesBot:
         self.application.add_handler(CommandHandler("replace", self.cmd_replace))
         self.application.add_handler(CommandHandler("cancelmatch", self.cmd_cancel_match))
         self.application.add_handler(CommandHandler("group", self.cmd_group))
+        self.application.add_handler(CommandHandler("initplayers", self.cmd_init_players))
         
         self.application.add_handler(MessageHandler(
             filters.Regex(r'^!nick\s+(\S.+)'), 
@@ -442,6 +470,18 @@ class UniverseHeroesBot:
         
         topic_name = GROUPS_CONFIG[group_key]['topic_name']
         await self.send_to_topic(update, context, topic_name, text)
+    
+    async def cmd_init_players(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            return
+        
+        total_added = 0
+        for group_name, players in PLAYERS.items():
+            for nick in players:
+                if self.db.add_player(nick):
+                    total_added += 1
+        
+        await update.message.reply_text(f"Added {total_added} players to database!")
     
     async def cmd_set_nick(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         match = re.match(r'^!nick\s+(\S.+)', update.message.text)
