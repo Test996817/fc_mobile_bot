@@ -480,9 +480,10 @@ class UniverseHeroesBot:
         for group_name, players in PLAYERS.items():
             for nick in players:
                 if self.db.add_player(nick):
+                    self.db.update_group_standings(nick, group_name)
                     total_added += 1
         
-        await update.message.reply_text(f"Added {total_added} players to database!")
+        await update.message.reply_text(f"Added {total_added} players and initialized standings!")
     
     async def cmd_clear_players(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
@@ -490,9 +491,11 @@ class UniverseHeroesBot:
         
         self.db.cursor.execute('DELETE FROM players')
         self.db.cursor.execute('DELETE FROM elo')
+        self.db.cursor.execute('DELETE FROM group_standings')
+        self.db.cursor.execute('DELETE FROM group_matches')
         self.db.commit()
         
-        await update.message.reply_text("Players and ELO cleared from database!")
+        await update.message.reply_text("Database cleared!")
     
     async def cmd_set_nick(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         match = re.match(r'^!nick\s+(\S.+)', update.message.text)
