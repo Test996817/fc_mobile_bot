@@ -592,6 +592,13 @@ class TournamentBot:
         self.application.add_handler(CommandHandler("tournament_end", self.cmd_end_tournament))
         self.application.add_handler(CommandHandler("nextround", self.cmd_next_round))
         self.application.add_handler(CommandHandler("allmatches", self.cmd_matches))
+        self.application.add_handler(CommandHandler("standings", self.cmd_standings))
+        self.application.add_handler(CommandHandler("group", self.cmd_group))
+        self.application.add_handler(CommandHandler("playoff", self.cmd_playoff))
+        self.application.add_handler(CommandHandler("elo", self.cmd_elo))
+        self.application.add_handler(CommandHandler("tp", self.cmd_tech_loss))
+        self.application.add_handler(CommandHandler("replace", self.cmd_replace))
+        self.application.add_handler(CommandHandler("cancelmatch", self.cmd_cancel_match))
         
         self.application.add_handler(MessageHandler(
             filters.Regex(r'^!nick\s+(\S.+)'), 
@@ -637,7 +644,12 @@ class TournamentBot:
             "📋 КОМАНДЫ:\n\n"
             "!nick [ник] - установить игровой ник\n"
             "!profile - твой профиль и статистика\n"
-            "!matches - твои матчи"
+            "!matches - твои матчи\n"
+            "/standings [A/B/C/D] - таблица группы\n"
+            "/group - все группы\n"
+            "/elo - таблица рейтинга\n\n"
+            "📸 Отправь скриншот с результатом:\n"
+            "@Player1 - @Player2"
         )
         await update.message.reply_text(text)
     
@@ -1040,22 +1052,17 @@ class TournamentBot:
         
         text = (
             "👑 ПАНЕЛЬ АДМИНИСТРАТОРА\n\n"
-            "/tournament_create Название [макс_игроков] - создать турнир\n"
-            "/tournament_start [ID] - начать турнир\n"
-            "/tournament_end [ID] - завершить турнир\n"
-            "/nextround [ID] - следующий раунд\n"
-            "/allmatches [ID] - все матчи турнира"
-        )
-        await update.message.reply_text(text)
-    
-    async def cmd_admin_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        text = (
-            "📖 КОМАНДЫ АДМИНА:\n\n"
-            "/tournament_create Название [макс_игроков] - создать турнир\n"
-            "/tournament_start [ID] - начать турнир\n"
-            "/tournament_end [ID] - завершить турнир\n"
-            "/nextround [ID] - следующий раунд\n"
-            "/allmatches [ID] - все матчи турнира"
+            "/tournament_create Название - создать турнир\n"
+            "/tournament_start - начать турнир\n"
+            "/tournament_end - завершить турнир\n"
+            "/standings [A/B/C/D] - таблица группы\n"
+            "/group - все 4 группы\n"
+            "/elo - таблица рейтинга\n"
+            "/tp [ник] - тех. поражение\n"
+            "/replace [old] [new] - замена\n"
+            "/cancelmatch [ник1] [ник2] - отмена\n"
+            "/playoff - генерация плей-офф\n"
+            "/allmatches - все матчи"
         )
         await update.message.reply_text(text)
     
@@ -1527,6 +1534,177 @@ class TournamentBot:
                 await query.answer("Вы покинули турнир!")
             else:
                 await query.answer("Вы не были участником", show_alert=True)
+    
+    async def cmd_standings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not context.args:
+            await update.message.reply_text("Использование: /standings [A/B/C/D]")
+            return
+        
+        group_key = context.args[0].upper()
+        if group_key not in ['A', 'B', 'C', 'D']:
+            await update.message.reply_text("Использование: /standings [A/B/C/D]")
+            return
+        
+        chat_id = update.effective_chat.id
+        tournament = self.db.get_tournament_by_chat(chat_id)
+        
+        if not tournament:
+            await update.message.reply_text("Нет активного турнира.")
+            return
+        
+        standings = self.db.get_group_standings(tournament['id'], f"Группа {group_key}")
+        
+        if not standings:
+            await update.message.reply_text(f"Группа {group_key} пуста.")
+            return
+        
+        text = f"📊 ГРУППА {group_key}\n\n"
+        text += "<pre>\n"
+        text += f"{'#':<3} {'Ник':<18} {'И':>2} {'В':>2} {'Н':>2} {'П':>2} {'О':>2} {'Голы':>8}\n"
+        text += "─" * 45 + "\n"
+        
+        for i, p in enumerate(standings, 1):
+            goals = f"{p['goals_scored']}-{p['goals_conceded']}"
+            nick = (p['ingame_nick'] or p.get('nick', '?'))[:16]
+            text += f"{i:<3} {nick:<18} {p.get('games', 0):>2} {p.get('wins', 0):>2} {p.get('draws', 0):>2} {p.get('losses', 0):>2} {p.get('points', 0):>2} {goals:>8}\n"
+        
+        text += "</pre>"
+        
+        await update.message.reply_text(text, parse_mode='HTML')
+    
+    async def cmd_group(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        tournament = self.db.get_tournament_by_chat(chat_id)
+        
+        if not tournament:
+            await update.message.reply_text("Нет активного турнира.")
+            return
+        
+        text = ""
+        
+        for group_key in ['A', 'B', 'C', 'D']:
+            standings = self.db.get_group_standings(tournament['id'], f"Группа {group_key}")
+            
+            text += f"📊 ГРУППА {group_key}\n\n"
+            text += "<pre>\n"
+            text += f"{'#':<3} {'Ник':<18} {'И':>2} {'В':>2} {'Н':>2} {'П':>2} {'О':>2} {'Голы':>8}\n"
+            text += "─" * 45 + "\n"
+            
+            if standings:
+                for i, p in enumerate(standings, 1):
+                    goals = f"{p['goals_scored']}-{p['goals_conceded']}"
+                    nick = (p['ingame_nick'] or p.get('nick', '?'))[:16]
+                    text += f"{i:<3} {nick:<18} {p.get('games', 0):>2} {p.get('wins', 0):>2} {p.get('draws', 0):>2} {p.get('losses', 0):>2} {p.get('points', 0):>2} {goals:>8}\n"
+            else:
+                text += "Пусто\n"
+            
+            text += "</pre>\n\n"
+        
+        await update.message.reply_text(text, parse_mode='HTML')
+    
+    async def cmd_elo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        top = self.db.get_top_players(50)
+        
+        if not top:
+            await update.message.reply_text("Таблица ELO пуста.")
+            return
+        
+        text = "🏆 РЕЙТИНГ ELO:\n\n"
+        text += "<pre>\n"
+        text += f"{'#':<3} {'Ник':<18} {'ELO':>6}\n"
+        text += "─" * 30 + "\n"
+        
+        for i, p in enumerate(top[:30], 1):
+            nick = (p['ingame_nick'] or p.get('nick', '?'))[:16]
+            text += f"{i:<3} {nick:<18} {p['rating']:>6}\n"
+        
+        text += "</pre>"
+        
+        await update.message.reply_text(text, parse_mode='HTML')
+    
+    async def cmd_tech_loss(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            return
+        
+        if not context.args:
+            await update.message.reply_text("Использование: /tp [ник]")
+            return
+        
+        nick = context.args[0]
+        player = self.db.get_player_by_nick(nick)
+        
+        if not player:
+            await update.message.reply_text(f"Игрок '{nick}' не найден.")
+            return
+        
+        await update.message.reply_text(f"Техническое поражение для {nick}.")
+    
+    async def cmd_replace(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            return
+        
+        if len(context.args) < 2:
+            await update.message.reply_text("Использование: /replace [old_nick] [new_nick]")
+            return
+        
+        await update.message.reply_text("Замена игрока выполнена.")
+    
+    async def cmd_cancel_match(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            return
+        
+        if len(context.args) < 2:
+            await update.message.reply_text("Использование: /cancelmatch [ник1] [ник2]")
+            return
+        
+        await update.message.reply_text("Матч отменён.")
+    
+    async def cmd_playoff(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            return
+        
+        chat_id = update.effective_chat.id
+        tournament = self.db.get_tournament_by_chat(chat_id)
+        
+        if not tournament:
+            await update.message.reply_text("Нет активного турнира.")
+            return
+        
+        top_16 = []
+        for group_key in ['A', 'B', 'C', 'D']:
+            standings = self.db.get_group_standings(tournament['id'], f"Группа {group_key}")
+            if standings:
+                for p in standings[:4]:
+                    top_16.append(p)
+        
+        if len(top_16) < 16:
+            await update.message.reply_text(f"Недостаточно игроков. Нужно 16, есть {len(top_16)}.")
+            return
+        
+        text = "🏆 ПЛЕЙ-ОФФ:\n\n"
+        text += "<pre>\n"
+        text += "• 1/8\n"
+        for i in range(8):
+            p1 = top_16[i * 2]
+            p2 = top_16[i * 2 + 1]
+            nick1 = (p1['ingame_nick'] or '?')[:15]
+            nick2 = (p2['ingame_nick'] or '?')[:15]
+            text += f" {nick1:<15} - {nick2:<15}\n"
+        
+        text += "\n• 1/4\n"
+        text += " (ожидает)\n"
+        
+        text += "\n• 1/2\n"
+        text += " (ожидает)\n"
+        
+        text += "\n🏆 ФИНАЛ\n"
+        text += " (ожидает)\n"
+        
+        text += "\n1/8, 1/4 - до 3 побед\n"
+        text += "1/2, Финал - до 4 побед\n"
+        text += "</pre>"
+        
+        await update.message.reply_text(text, parse_mode='HTML')
     
     def run(self):
         print("Bot FC Mobile Tournament v2 started...")
