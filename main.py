@@ -50,6 +50,11 @@ AVAILABLE_FORMATS: Dict[str, TournamentFormat] = {
         has_groups=False,
         description="Выбывание после первого поражения"
     ),
+    "classical": TournamentFormat(
+        name="Классический",
+        has_groups=True,
+        description="4 группы по 8, плей-офф"
+    ),
 }
 
 
@@ -88,9 +93,16 @@ class Database:
                 current_round INTEGER DEFAULT 0,
                 groups_count INTEGER DEFAULT 0,
                 created_by INTEGER NOT NULL,
+                playoff_message_id INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        
+        try:
+            self.cursor.execute('ALTER TABLE tournaments ADD COLUMN playoff_message_id INTEGER')
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
         
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS tournament_players (
@@ -130,6 +142,23 @@ class Database:
             CREATE TABLE IF NOT EXISTS admins (
                 user_id INTEGER PRIMARY KEY,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS playoff_matches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tournament_id INTEGER NOT NULL,
+                stage TEXT NOT NULL,
+                match_num INTEGER NOT NULL,
+                player1_nick TEXT,
+                player2_nick TEXT,
+                player1_wins INTEGER DEFAULT 0,
+                player2_wins INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'pending',
+                message_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(tournament_id, stage, match_num)
             )
         ''')
         
@@ -482,6 +511,73 @@ class Database:
         
         standings.sort(key=lambda x: (-x['points'], -(x['goals_scored'] - x['goals_conceded']), -x['goals_scored']))
         return standings
+    
+    def get_playoff_matches(self, tournament_id: int, stage: str = None) -> List[Dict]:
+        if stage:
+            self.cursor.execute('''
+                SELECT * FROM playoff_matches 
+                WHERE tournament_id = ? AND stage = ?
+                ORDER BY match_num
+            ''', (tournament_id, stage))
+        else:
+            self.cursor.execute('''
+                SELECT * FROM playoff_matches 
+                WHERE tournament_id = ?
+                ORDER BY 
+                    CASE stage 
+                        WHEN '1/8' THEN 1 
+                        WHEN '1/4' THEN 2 
+                        WHEN '1/2' THEN 3 
+                        WHEN 'final' THEN 4 
+                    END, match_num
+            ''', (tournament_id,))
+        
+        columns = ['id', 'tournament_id', 'stage', 'match_num', 'player1_nick', 'player2_nick',
+                   'player1_wins', 'player2_wins', 'status', 'message_id', 'created_at']
+        return [dict(zip(columns, row)) for row in self.cursor.fetchall()]
+    
+    def add_playoff_match(self, tournament_id: int, stage: str, match_num: int, 
+                          player1_nick: str = None, player2_nick: str = None) -> int:
+        try:
+            self.cursor.execute('''
+                INSERT INTO playoff_matches (tournament_id, stage, match_num, player1_nick, player2_nick)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (tournament_id, stage, match_num, player1_nick, player2_nick))
+            self.conn.commit()
+            return self.cursor.lastrowid
+        except sqlite3.IntegrityError:
+            self.cursor.execute('''
+                UPDATE playoff_matches SET player1_nick = ?, player2_nick = ?
+                WHERE tournament_id = ? AND stage = ? AND match_num = ?
+            ''', (player1_nick, player2_nick, tournament_id, stage, match_num))
+            self.conn.commit()
+            return None
+    
+    def update_playoff_match(self, match_id: int, player1_wins: int = None, player2_wins: int = None,
+                             status: str = None, message_id: int = None):
+        updates = []
+        params = []
+        if player1_wins is not None:
+            updates.append('player1_wins = ?')
+            params.append(player1_wins)
+        if player2_wins is not None:
+            updates.append('player2_wins = ?')
+            params.append(player2_wins)
+        if status:
+            updates.append('status = ?')
+            params.append(status)
+        if message_id:
+            updates.append('message_id = ?')
+            params.append(message_id)
+        
+        if updates:
+            params.append(match_id)
+            self.cursor.execute(f'UPDATE playoff_matches SET {", ".join(updates)} WHERE id = ?', params)
+            self.conn.commit()
+    
+    def clear_playoff_matches(self, tournament_id: int):
+        self.cursor.execute('DELETE FROM playoff_matches WHERE tournament_id = ?', (tournament_id,))
+        self.conn.commit()
 
 
 class EloCalculator:
@@ -595,6 +691,7 @@ class TournamentBot:
         self.application.add_handler(CommandHandler("standings", self.cmd_standings))
         self.application.add_handler(CommandHandler("group", self.cmd_group))
         self.application.add_handler(CommandHandler("playoff", self.cmd_playoff))
+        self.application.add_handler(CommandHandler("pw", self.cmd_playoff_win))
         self.application.add_handler(CommandHandler("elo", self.cmd_elo))
         self.application.add_handler(CommandHandler("tp", self.cmd_tech_loss))
         self.application.add_handler(CommandHandler("replace", self.cmd_replace))
@@ -1062,6 +1159,7 @@ class TournamentBot:
             "/replace [old] [new] - замена\n"
             "/cancelmatch [ник1] [ник2] - отмена\n"
             "/playoff - генерация плей-офф\n"
+            "/pw [стадия] [№] [ник] [счёт] - результат\n"
             "/allmatches - все матчи"
         )
         await update.message.reply_text(text)
@@ -1075,13 +1173,19 @@ class TournamentBot:
             args = context.args
             if not args:
                 await update.message.reply_text(
-                    "Использование: /tournament_create Название [макс_игроков]\n\n"
-                    "Формат: Single Elimination (выбывание)"
+                    "Использование: /tournament_create Название [формат]\n\n"
+                    "Форматы:\n"
+                    "- classical - Классический (4 группы по 8, 32 игрока)\n"
+                    "- elimination - Single Elimination"
                 )
                 return
             
             name = args[0]
-            max_players = int(args[1]) if len(args) > 1 and args[1].isdigit() else None
+            format_name = args[1] if len(args) > 1 else "classical"
+            
+            if format_name not in AVAILABLE_FORMATS:
+                await update.message.reply_text("Неизвестный формат.")
+                return
             
             chat_id = update.effective_chat.id
             
@@ -1090,9 +1194,9 @@ class TournamentBot:
                 await update.message.reply_text("В этой группе уже есть активный турнир.")
                 return
             
-            format_name = "single_elimination"
             format_obj = AVAILABLE_FORMATS[format_name]
-            groups_count = 0
+            max_players = 32 if format_name == "classical" else None
+            groups_count = 4 if format_name == "classical" else 0
             
             tournament_id = self.db.create_tournament(
                 name=name,
@@ -1108,7 +1212,7 @@ class TournamentBot:
                 f"ID: {tournament_id}\n"
                 f"Название: {name}\n"
                 f"Формат: {format_obj.name}\n"
-                f"Макс. игроков: {max_players or 'без ограничений'}"
+                f"Игроков: до {max_players or '∞'}"
             )
             
             await self.send_join_message(chat_id, tournament_id)
@@ -1681,30 +1785,138 @@ class TournamentBot:
             await update.message.reply_text(f"Недостаточно игроков. Нужно 16, есть {len(top_16)}.")
             return
         
-        text = "🏆 ПЛЕЙ-ОФФ:\n\n"
-        text += "<pre>\n"
-        text += "• 1/8\n"
+        self.db.clear_playoff_matches(tournament['id'])
+        
         for i in range(8):
             p1 = top_16[i * 2]
             p2 = top_16[i * 2 + 1]
-            nick1 = (p1['ingame_nick'] or '?')[:15]
-            nick2 = (p2['ingame_nick'] or '?')[:15]
-            text += f" {nick1:<15} - {nick2:<15}\n"
+            self.db.add_playoff_match(tournament['id'], '1/8', i + 1, 
+                                     p1['ingame_nick'], p2['ingame_nick'])
         
-        text += "\n• 1/4\n"
-        text += " (ожидает)\n"
+        bracket_text = self.format_playoff_bracket(tournament['id'])
         
-        text += "\n• 1/2\n"
-        text += " (ожидает)\n"
+        msg = await update.message.reply_text(bracket_text, parse_mode='HTML', disable_web_page_preview=True)
         
-        text += "\n🏆 ФИНАЛ\n"
-        text += " (ожидает)\n"
+        self.db.cursor.execute(
+            'UPDATE tournaments SET playoff_message_id = ? WHERE id = ?',
+            (msg.message_id, tournament['id'])
+        )
+        self.db.conn.commit()
+    
+    def format_playoff_bracket(self, tournament_id: int) -> str:
+        stages = [('1/8', 8, 3), ('1/4', 4, 3), ('1/2', 2, 4), ('final', 1, 4)]
         
-        text += "\n1/8, 1/4 - до 3 побед\n"
-        text += "1/2, Финал - до 4 побед\n"
-        text += "</pre>"
+        text = "🏆 ПЛЕЙ-ОФФ\n\n"
+        text += "<pre>\n"
         
-        await update.message.reply_text(text, parse_mode='HTML')
+        for stage, num_matches, wins_needed in stages:
+            matches = self.db.get_playoff_matches(tournament_id, stage)
+            if stage == '1/8':
+                text += "• 1/8 "
+                text += f"(до {wins_needed} побед)\n"
+            elif stage == '1/4':
+                text += "\n• 1/4 "
+                text += f"(до {wins_needed} побед)\n"
+            elif stage == '1/2':
+                text += "\n• 1/2 "
+                text += f"(до {wins_needed} побед)\n"
+            else:
+                text += "\n🏆 ФИНАЛ "
+                text += f"(до {wins_needed} побед)\n"
+            
+            for match in matches:
+                p1 = (match['player1_nick'] or '?')[:12]
+                p2 = (match['player2_nick'] or '?')[:12]
+                w1 = match['player1_wins']
+                w2 = match['player2_wins']
+                if match['status'] == 'completed':
+                    text += f"✅ {p1:<12} {w1}-{w2} {p2:<12}\n"
+                elif w1 > 0 or w2 > 0:
+                    text += f"⚽ {p1:<12} {w1}-{w2} {p2:<12}\n"
+                else:
+                    text += f"  {p1:<12} vs {p2:<12}\n"
+        
+        text += "\n</pre>"
+        text += "⚽ - идут игры, ✅ - завершено"
+        
+        return text
+    
+    async def cmd_playoff_win(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            return
+        
+        if not context.args or len(context.args) < 3:
+            await update.message.reply_text(
+                "Использование: /pw [стадия] [номер] [ник_победителя] [счёт1] [счёт2]\n"
+                "Пример: /pw 1/8 1 Player1 3 1\n"
+                "Стадии: 1/8, 1/4, 1/2, final"
+            )
+            return
+        
+        stage = context.args[0]
+        if stage not in ['1/8', '1/4', '1/2', 'final']:
+            await update.message.reply_text("Неверная стадия. Используйте: 1/8, 1/4, 1/2, final")
+            return
+        
+        chat_id = update.effective_chat.id
+        tournament = self.db.get_tournament_by_chat(chat_id)
+        
+        if not tournament:
+            await update.message.reply_text("Нет активного турнира.")
+            return
+        
+        try:
+            match_num = int(context.args[1])
+            winner_nick = context.args[2]
+            wins_needed = 3 if stage in ['1/8', '1/4'] else 4
+            
+            w1 = int(context.args[3]) if len(context.args) > 3 else wins_needed
+            w2 = int(context.args[4]) if len(context.args) > 4 else 0
+        except ValueError:
+            await update.message.reply_text("Неверный формат.")
+            return
+        
+        matches = self.db.get_playoff_matches(tournament['id'], stage)
+        match = next((m for m in matches if m['match_num'] == match_num), None)
+        
+        if not match:
+            await update.message.reply_text(f"Матч {stage} #{match_num} не найден.")
+            return
+        
+        if match['player1_nick'] == winner_nick:
+            player1_wins = w1
+            player2_wins = w2
+        elif match['player2_nick'] == winner_nick:
+            player1_wins = w2
+            player2_wins = w1
+        else:
+            await update.message.reply_text(f"Игрок '{winner_nick}' не найден в этом матче.")
+            return
+        
+        status = 'completed' if (player1_wins >= wins_needed or player2_wins >= wins_needed) else 'in_progress'
+        
+        self.db.update_playoff_match(match['id'], player1_wins, player2_wins, status)
+        
+        bracket_text = self.format_playoff_bracket(tournament['id'])
+        
+        if tournament.get('playoff_message_id'):
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=tournament['playoff_message_id'],
+                    text=bracket_text,
+                    parse_mode='HTML',
+                    disable_web_page_preview=True
+                )
+            except Exception:
+                pass
+        
+        result_text = f"✅ Записан результат:\n"
+        result_text += f"{match['player1_nick']} {player1_wins}-{player2_wins} {match['player2_nick']}\n"
+        if status == 'completed':
+            result_text += f"\n🏆 {winner_nick} проходит в следующий раунд!"
+        
+        await update.message.reply_text(result_text)
     
     def run(self):
         print("Bot FC Mobile Tournament v2 started...")
