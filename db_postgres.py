@@ -544,3 +544,13 @@ class ScreenshotAnalyzer:
         self.cursor.execute('DELETE FROM tournament_players WHERE tournament_id = %s', (tournament_id,))
         self.cursor.execute('DELETE FROM tournaments WHERE id = %s', (tournament_id,))
         self.conn.commit()
+
+    def clear_all_tournaments(self):
+        self.cursor.execute('DELETE FROM matches')
+        self.cursor.execute('DELETE FROM playoff_matches')
+        self.cursor.execute('DELETE FROM tournament_players')
+        self.cursor.execute('DELETE FROM tournaments')
+        self.cursor.execute("SELECT setval('tournaments_id_seq', 1, false)")
+        self.cursor.execute("SELECT setval('matches_id_seq', 1, false)")
+        self.cursor.execute("SELECT setval('playoff_matches_id_seq', 1, false)")
+        self.conn.commit()

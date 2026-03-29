@@ -1782,10 +1782,8 @@ class TournamentBot:
         if not self.db.is_admin(update.effective_user.id):
             return
         
-        self.db.delete_tournament(1)
-        self.db.delete_tournament(2)
-        self.db.delete_tournament(3)
-        await update.message.reply_text("Активные турниры очищены.")
+        self.db.clear_all_tournaments()
+        await update.message.reply_text("Все турниры и счётчики сброшены.")
     
     async def cmd_playoff(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
