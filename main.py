@@ -718,6 +718,7 @@ class TournamentBot:
         self.application.add_handler(CommandHandler("replace", self.cmd_replace))
         self.application.add_handler(CommandHandler("cancelmatch", self.cmd_cancel_match))
         self.application.add_handler(CommandHandler("cleartournament", self.cmd_clear_tournament))
+        self.application.add_handler(CommandHandler("notifyall", self.cmd_notify_all))
         
         self.application.add_handler(MessageHandler(
             filters.Regex(r'^!nick\s+(\S.+)'), 
@@ -1794,6 +1795,49 @@ class TournamentBot:
         
         self.db.clear_all_tournaments()
         await update.message.reply_text("Все турниры и счётчики сброшены.")
+    
+    async def cmd_notify_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            return
+        
+        chat_id = update.effective_chat.id
+        tournament = self.db.get_tournament_by_chat(chat_id)
+        
+        if not tournament:
+            await update.message.reply_text("Нет активного турнира.")
+            return
+        
+        players = self.db.get_tournament_players(tournament['id'], 'joined')
+        if not players:
+            await update.message.reply_text("Нет зарегистрированных игроков.")
+            return
+        
+        mentions = []
+        for p in players:
+            player = self.db.get_player(p['user_id'])
+            if player and player.get('telegram_id'):
+                mentions.append(f"[{player['ingame_nick']}](tg://user?id={player['telegram_id']})")
+        
+        if not mentions:
+            for p in players:
+                mentions.append(p['ingame_nick'])
+        
+        text = "📢 ВСЕ НА РЕГИСТРАЦИЮ!\n\n"
+        text += f"Турнир: {tournament['name']}\n"
+        text += f"Регистрация открыта!\n\n"
+        text += "Присоединяйтесь!\n\n"
+        text += " ".join(mentions)
+        
+        try:
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode='Markdown',
+                message_thread_id=tournament.get('topic_id')
+            )
+        except Exception as e:
+            logger.error(f"Error sending notify: {e}")
+            await update.message.reply_text("Ошибка при отправке уведомления.")
     
     async def cmd_playoff(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
