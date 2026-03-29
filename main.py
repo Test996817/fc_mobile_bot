@@ -1808,15 +1808,12 @@ class TournamentBot:
             return
         
         all_players = self.db.get_tournament_players(tournament['id'])
-        
-        if not all_players:
-            await update.message.reply_text("Нет зарегистрированных игроков.")
-            return
-        
         joined = [p for p in all_players if p.get('tournament_status') == 'joined']
         
+        not_joined = [p for p in all_players if p.get('tournament_status') != 'joined']
+        
         mentions = []
-        for p in joined:
+        for p in not_joined:
             player = self.db.get_player(p['user_id'])
             if player and player.get('telegram_id'):
                 mentions.append(f"[{player['ingame_nick']}](tg://user?id={player['telegram_id']})")
