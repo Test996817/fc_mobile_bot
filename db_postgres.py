@@ -195,14 +195,18 @@ class Database:
             INSERT INTO tournaments (name, format, chat_id, created_by, 
                                    max_players, min_players, deadline_days, groups_count)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
         ''', (name, format, chat_id, created_by, max_players, min_players, deadline_days, groups_count))
-        self.conn.commit()
-        return self.cursor.lastval()
+        return self.cursor.fetchone()['id']
     
     def get_tournament(self, tournament_id: int) -> Optional[Dict]:
         self.cursor.execute('SELECT * FROM tournaments WHERE id = %s', (tournament_id,))
         row = self.cursor.fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        result = dict(row)
+        result['players'] = self.get_tournament_players(tournament_id)
+        return result
     
     def get_tournament_by_chat(self, chat_id: int) -> Optional[Dict]:
         self.cursor.execute('''
@@ -391,9 +395,10 @@ class Database:
         self.cursor.execute('''
             INSERT INTO matches (tournament_id, player1_id, player2_id, round_num)
             VALUES (%s, %s, %s, %s)
+            RETURNING id
         ''', (tournament_id, player1_id, player2_id, round_num))
         self.conn.commit()
-        return self.cursor.lastval()
+        return self.cursor.fetchone()['id']
     
     def update_player_stats(self, user_id: int, result: str, goals_scored: int, 
                            goals_conceded: int, rating_change: int):
@@ -446,9 +451,10 @@ class Database:
             self.cursor.execute('''
                 INSERT INTO playoff_matches (tournament_id, stage, match_num, player1_nick, player2_nick)
                 VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
             ''', (tournament_id, stage, match_num, player1_nick, player2_nick))
             self.conn.commit()
-            return self.cursor.lastval()
+            return self.cursor.fetchone()['id']
         except Exception:
             self.cursor.execute('''
                 UPDATE playoff_matches SET player1_nick = %s, player2_nick = %s
