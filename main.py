@@ -581,6 +581,13 @@ class Database:
         self.cursor.execute('DELETE FROM playoff_matches WHERE tournament_id = ?', (tournament_id,))
         self.conn.commit()
 
+    def delete_tournament(self, tournament_id: int):
+        self.cursor.execute('DELETE FROM matches WHERE tournament_id = ?', (tournament_id,))
+        self.cursor.execute('DELETE FROM playoff_matches WHERE tournament_id = ?', (tournament_id,))
+        self.cursor.execute('DELETE FROM tournament_players WHERE tournament_id = ?', (tournament_id,))
+        self.cursor.execute('DELETE FROM tournaments WHERE id = ?', (tournament_id,))
+        self.conn.commit()
+
 
 if USE_POSTGRES:
     from db_postgres import Database
