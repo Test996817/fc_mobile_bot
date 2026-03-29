@@ -537,3 +537,10 @@ class ScreenshotAnalyzer:
                 return int(match.group(1)), int(match.group(2))
         
         return None, None
+
+    def delete_tournament(self, tournament_id: int):
+        self.cursor.execute('DELETE FROM matches WHERE tournament_id = %s', (tournament_id,))
+        self.cursor.execute('DELETE FROM playoff_matches WHERE tournament_id = %s', (tournament_id,))
+        self.cursor.execute('DELETE FROM tournament_players WHERE tournament_id = %s', (tournament_id,))
+        self.cursor.execute('DELETE FROM tournaments WHERE id = %s', (tournament_id,))
+        self.conn.commit()

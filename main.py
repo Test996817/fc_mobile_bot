@@ -703,6 +703,7 @@ class TournamentBot:
         self.application.add_handler(CommandHandler("tp", self.cmd_tech_loss))
         self.application.add_handler(CommandHandler("replace", self.cmd_replace))
         self.application.add_handler(CommandHandler("cancelmatch", self.cmd_cancel_match))
+        self.application.add_handler(CommandHandler("cleartournament", self.cmd_clear_tournament))
         
         self.application.add_handler(MessageHandler(
             filters.Regex(r'^!nick\s+(\S.+)'), 
@@ -1769,6 +1770,15 @@ class TournamentBot:
             return
         
         await update.message.reply_text("Матч отменён.")
+
+    async def cmd_clear_tournament(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            return
+        
+        self.db.delete_tournament(1)
+        self.db.delete_tournament(2)
+        self.db.delete_tournament(3)
+        await update.message.reply_text("Активные турниры очищены.")
     
     async def cmd_playoff(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
