@@ -1809,29 +1809,29 @@ class TournamentBot:
         
         all_players = self.db.get_tournament_players(tournament['id'])
         joined = [p for p in all_players if p.get('tournament_status') == 'joined']
-        pending = [p for p in all_players if p.get('tournament_status') != 'joined']
-        
-        mentions = []
-        for p in pending:
-            player = self.db.get_player(p['user_id'])
-            if player and player.get('telegram_id'):
-                mentions.append(f"[{player['ingame_nick']}](tg://user?id={player['telegram_id']})")
         
         text = "📢 ВСЕ НА РЕГИСТРАЦИЮ!\n\n"
-        text += f"Турнир: {tournament['name']}\n"
-        text += f"Зарегистрировано: {len(joined)}/{tournament['max_players']}\n\n"
+        text += f"🏆 {tournament['name']}\n"
+        text += f"📊 Зарегистрировано: {len(joined)}/{tournament['max_players']}\n\n"
         
-        if pending:
-            text += "Ещё не зарегистрированы:\n"
-            text += " ".join(mentions) + "\n\n"
+        if joined:
+            text += "Участники:\n"
+            for i, p in enumerate(joined, 1):
+                text += f"  {i}. {p.get('ingame_nick', 'Unknown')}\n"
+            text += "\n"
         
-        text += "Нажмите кнопку ниже чтобы присоединиться!"
+        text += "❗️ Ещё не зарегистрировались - нажмите кнопку ниже!"
+        
+        keyboard = [
+            [InlineKeyboardButton("✅ ПРИСОЕДИНИТЬСЯ", callback_data="join_tournament")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
         try:
             await self.application.bot.send_message(
                 chat_id=chat_id,
                 text=text,
-                parse_mode='Markdown',
+                reply_markup=reply_markup,
                 message_thread_id=tournament.get('topic_id')
             )
         except Exception as e:
