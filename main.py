@@ -719,7 +719,6 @@ class TournamentBot:
         self.application.add_handler(CommandHandler("cancelmatch", self.cmd_cancel_match))
         self.application.add_handler(CommandHandler("cleartournament", self.cmd_clear_tournament))
         self.application.add_handler(CommandHandler("notifyall", self.cmd_notify_all))
-        self.application.add_handler(CommandHandler("resendreg", self.cmd_resend_reg))
         
         self.application.add_handler(MessageHandler(
             filters.Regex(r'^!nick\s+(\S.+)'), 
@@ -1838,20 +1837,6 @@ class TournamentBot:
         except Exception as e:
             logger.error(f"Error sending notify: {e}")
             await update.message.reply_text("Ошибка при отправке уведомления.")
-    
-    async def cmd_resend_reg(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.db.is_admin(update.effective_user.id):
-            return
-        
-        chat_id = update.effective_chat.id
-        tournament = self.db.get_tournament_by_chat(chat_id)
-        
-        if not tournament:
-            await update.message.reply_text("Нет активного турнира.")
-            return
-        
-        await self.send_join_message(chat_id, tournament['id'])
-        await update.message.reply_text("Сообщение с регистрацией отправлено!")
     
     async def cmd_playoff(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
