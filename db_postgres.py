@@ -191,11 +191,6 @@ class Database:
         row = self.cursor.fetchone()
         return dict(row) if row else None
     
-    def get_all_players(self) -> List[Dict]:
-        self.cursor.execute('SELECT * FROM players')
-        rows = self.cursor.fetchall()
-        return [dict(row) for row in rows]
-    
     def update_player_nick(self, user_id: int, ingame_nick: str):
         self.cursor.execute('UPDATE players SET ingame_nick = %s WHERE user_id = %s', 
                           (ingame_nick, user_id))
