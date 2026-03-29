@@ -96,12 +96,19 @@ class Database:
                 groups_count INTEGER DEFAULT 0,
                 created_by INTEGER NOT NULL,
                 playoff_message_id INTEGER,
+                topic_id INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
         try:
             self.cursor.execute('ALTER TABLE tournaments ADD COLUMN playoff_message_id INTEGER')
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        
+        try:
+            self.cursor.execute('ALTER TABLE tournaments ADD COLUMN topic_id INTEGER')
             self.conn.commit()
         except sqlite3.OperationalError:
             pass
@@ -222,12 +229,12 @@ class Database:
     def create_tournament(self, name: str, format: str, chat_id: int, 
                          created_by: int, max_players: int = None, 
                          min_players: int = 4, deadline_days: int = 3,
-                         groups_count: int = 0) -> int:
+                         groups_count: int = 0, topic_id: int = None) -> int:
         self.cursor.execute('''
             INSERT INTO tournaments (name, format, chat_id, created_by, 
-                                   max_players, min_players, deadline_days, groups_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (name, format, chat_id, created_by, max_players, min_players, deadline_days, groups_count))
+                                   max_players, min_players, deadline_days, groups_count, topic_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (name, format, chat_id, created_by, max_players, min_players, deadline_days, groups_count, topic_id))
         self.conn.commit()
         return self.cursor.lastrowid
     
@@ -1203,6 +1210,7 @@ class TournamentBot:
                 return
             
             chat_id = update.effective_chat.id
+            topic_id = update.message.message_thread_id
             
             existing = self.db.get_tournament_by_chat(chat_id)
             if existing:
@@ -1219,7 +1227,8 @@ class TournamentBot:
                 chat_id=chat_id,
                 created_by=update.effective_user.id,
                 max_players=max_players,
-                groups_count=groups_count
+                groups_count=groups_count,
+                topic_id=topic_id
             )
             
             await update.message.reply_text(
@@ -1267,7 +1276,8 @@ class TournamentBot:
             msg = await self.application.bot.send_message(
                 chat_id=chat_id,
                 text=text,
-                reply_markup=reply_markup
+                reply_markup=reply_markup,
+                message_thread_id=tournament.get('topic_id')
             )
             self.join_message_id = msg.message_id
             self.join_chat_id = chat_id

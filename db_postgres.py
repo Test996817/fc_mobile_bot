@@ -78,9 +78,26 @@ class Database:
                 current_round INTEGER DEFAULT 0,
                 groups_count INTEGER DEFAULT 0,
                 created_by BIGINT NOT NULL,
+                playoff_message_id INTEGER,
+                topic_id INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        
+        self.cursor.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                               WHERE table_name='tournaments' AND column_name='topic_id') THEN
+                    ALTER TABLE tournaments ADD COLUMN topic_id INTEGER;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                               WHERE table_name='tournaments' AND column_name='playoff_message_id') THEN
+                    ALTER TABLE tournaments ADD COLUMN playoff_message_id INTEGER;
+                END IF;
+            END
+            $$;
+        """)
         
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS tournament_players (
@@ -190,13 +207,13 @@ class Database:
     def create_tournament(self, name: str, format: str, chat_id: int, 
                          created_by: int, max_players: int = None, 
                          min_players: int = 4, deadline_days: int = 3,
-                         groups_count: int = 0) -> int:
+                         groups_count: int = 0, topic_id: int = None) -> int:
         self.cursor.execute('''
             INSERT INTO tournaments (name, format, chat_id, created_by, 
-                                   max_players, min_players, deadline_days, groups_count)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                   max_players, min_players, deadline_days, groups_count, topic_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
-        ''', (name, format, chat_id, created_by, max_players, min_players, deadline_days, groups_count))
+        ''', (name, format, chat_id, created_by, max_players, min_players, deadline_days, groups_count, topic_id))
         return self.cursor.fetchone()['id']
     
     def get_tournament(self, tournament_id: int) -> Optional[Dict]:
