@@ -1810,6 +1810,10 @@ class TournamentBot:
         all_players = self.db.get_tournament_players(tournament['id'])
         not_joined = [p for p in all_players if p.get('tournament_status') != 'joined']
         
+        if not all_players:
+            await update.message.reply_text("Нет зарегистрированных игроков.")
+            return
+        
         if not not_joined:
             await update.message.reply_text("Все уже зарегистрированы!")
             return
