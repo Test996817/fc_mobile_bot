@@ -1807,25 +1807,26 @@ class TournamentBot:
             await update.message.reply_text("Нет активного турнира.")
             return
         
-        players = self.db.get_tournament_players(tournament['id'], 'joined')
-        if not players:
-            await update.message.reply_text("Нет зарегистрированных игроков.")
+        all_players = self.db.get_tournament_players(tournament['id'])
+        not_joined = [p for p in all_players if p.get('tournament_status') != 'joined']
+        
+        if not not_joined:
+            await update.message.reply_text("Все уже зарегистрированы!")
             return
         
         mentions = []
-        for p in players:
+        for p in not_joined:
             player = self.db.get_player(p['user_id'])
             if player and player.get('telegram_id'):
                 mentions.append(f"[{player['ingame_nick']}](tg://user?id={player['telegram_id']})")
         
         if not mentions:
-            for p in players:
+            for p in not_joined:
                 mentions.append(p['ingame_nick'])
         
         text = "📢 ВСЕ НА РЕГИСТРАЦИЮ!\n\n"
         text += f"Турнир: {tournament['name']}\n"
-        text += f"Регистрация открыта!\n\n"
-        text += "Присоединяйтесь!\n\n"
+        text += f"Зарегистрировано: {len(all_players) - len(not_joined)}/{tournament['max_players'] or len(all_players)}\n\n"
         text += " ".join(mentions)
         
         try:
