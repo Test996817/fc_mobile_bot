@@ -1347,12 +1347,12 @@ class TournamentBot:
             await update.message.reply_text("Турнир не найден.")
             return
         
-        approved = [p for p in tournament['players'] if p['tournament_status'] == 'approved']
+        joined = [p for p in tournament['players'] if p['tournament_status'] == 'joined']
         
-        if len(approved) < tournament['min_players']:
+        if len(joined) < tournament['min_players']:
             await update.message.reply_text(
                 f"Недостаточно игроков. Нужно минимум {tournament['min_players']}, "
-                f"одобрено {len(approved)}"
+                f"зарегистрировано {len(joined)}"
             )
             return
         
@@ -1361,10 +1361,10 @@ class TournamentBot:
         format_obj = AVAILABLE_FORMATS.get(tournament['format'], AVAILABLE_FORMATS['single_elimination'])
         
         if format_obj.has_groups:
-            self.create_group_stage(tournament, approved)
+            self.create_group_stage(tournament, joined)
             message = f"Групповой этап создан!"
         else:
-            self.create_knockout_bracket(tournament, approved)
+            self.create_knockout_bracket(tournament, joined)
             message = "Плей-офф создан!"
         
         await update.message.reply_text(
