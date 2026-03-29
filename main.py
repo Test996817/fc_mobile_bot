@@ -199,6 +199,11 @@ class Database:
             return self._row_to_player(row)
         return None
     
+    def get_all_players(self) -> List[Dict]:
+        self.cursor.execute('SELECT * FROM players')
+        rows = self.cursor.fetchall()
+        return [self._row_to_player(row) for row in rows]
+    
     def _row_to_player(self, row) -> Dict:
         return {
             'user_id': row[0],
@@ -1809,14 +1814,14 @@ class TournamentBot:
         
         all_players = self.db.get_tournament_players(tournament['id'])
         joined = [p for p in all_players if p.get('tournament_status') == 'joined']
+        registered_user_ids = {p['user_id'] for p in all_players}
         
-        not_joined = [p for p in all_players if p.get('tournament_status') != 'joined']
+        all_db_players = self.db.get_all_players()
+        unregistered_players = [p for p in all_db_players if p['user_id'] not in registered_user_ids and p.get('telegram_id')]
         
         mentions = []
-        for p in not_joined:
-            player = self.db.get_player(p['user_id'])
-            if player and player.get('telegram_id'):
-                mentions.append(f"[{player['ingame_nick']}](tg://user?id={player['telegram_id']})")
+        for p in unregistered_players[:30]:
+            mentions.append(f"[{p['ingame_nick']}](tg://user?id={p['telegram_id']})")
         
         text = "📢 ВСЕ НА РЕГИСТРАЦИЮ!\n\n"
         text += f"Турнир: {tournament['name']}\n"
