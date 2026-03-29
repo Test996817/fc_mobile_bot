@@ -10,7 +10,11 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
+USE_POSTGRES = bool(os.getenv("DATABASE_URL"))
+
 from dotenv import load_dotenv
+load_dotenv()
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -20,8 +24,6 @@ from telegram.ext import (
     filters,
     ContextTypes
 )
-
-load_dotenv()
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -57,11 +59,11 @@ AVAILABLE_FORMATS: Dict[str, TournamentFormat] = {
     ),
 }
 
-
 class Database:
     def __init__(self, db_name: str = "tournament_bot.db"):
         self.conn = sqlite3.connect(db_name, check_same_thread=False)
         self.cursor = self.conn.cursor()
+        self.conn.row_factory = sqlite3.Row
         self.create_tables()
     
     def create_tables(self):
@@ -578,6 +580,11 @@ class Database:
     def clear_playoff_matches(self, tournament_id: int):
         self.cursor.execute('DELETE FROM playoff_matches WHERE tournament_id = ?', (tournament_id,))
         self.conn.commit()
+
+
+if USE_POSTGRES:
+    from db_postgres import Database
+    from db_postgres import AVAILABLE_FORMATS as AVAILABLE_FORMATS
 
 
 class EloCalculator:

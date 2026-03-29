@@ -29,6 +29,11 @@ AVAILABLE_FORMATS: Dict[str, TournamentFormat] = {
         has_groups=False,
         description="Выбывание после первого поражения"
     ),
+    "classical": TournamentFormat(
+        name="Классический",
+        has_groups=True,
+        description="4 группы по 8, плей-офф"
+    ),
 }
 
 class Database:
@@ -116,6 +121,30 @@ class Database:
                 user_id BIGINT PRIMARY KEY,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
+        ''')
+        
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS playoff_matches (
+                id SERIAL PRIMARY KEY,
+                tournament_id INTEGER NOT NULL,
+                stage TEXT NOT NULL,
+                match_num INTEGER NOT NULL,
+                player1_nick TEXT,
+                player2_nick TEXT,
+                player1_wins INTEGER DEFAULT 0,
+                player2_wins INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'pending',
+                message_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(tournament_id, stage, match_num)
+            )
+        ''')
+        
+        self.cursor.execute('''
+            DO $$ BEGIN
+                ALTER TABLE tournaments ADD COLUMN playoff_message_id INTEGER;
+            EXCEPTION WHEN others THEN NULL;
+            END $$;
         ''')
         
         self.conn.commit()
@@ -221,6 +250,99 @@ class Database:
         row = self.cursor.fetchone()
         return dict(row) if row else None
     
+    def get_tournament_players(self, tournament_id: int, status: str = None) -> List[Dict]:
+        query = '''
+            SELECT p.*, tp.status as tournament_status, tp.group_name 
+            FROM tournament_players tp
+            JOIN players p ON tp.user_id = p.user_id
+            WHERE tp.tournament_id = %s
+        '''
+        params = [tournament_id]
+        if status:
+            query += ' AND tp.status = %s'
+            params.append(status)
+        
+        self.cursor.execute(query, params)
+        return [dict(row) for row in self.cursor.fetchall()]
+    
+    def update_tournament_player_status(self, tournament_id: int, user_id: int, 
+                                       status: str, approved_by: int = None):
+        self.cursor.execute('''
+            UPDATE tournament_players 
+            SET status = %s, approved_by = %s
+            WHERE tournament_id = %s AND user_id = %s
+        ''', (status, approved_by, tournament_id, user_id))
+        self.conn.commit()
+    
+    def get_tournaments_by_chat(self, chat_id: int) -> List[Dict]:
+        self.cursor.execute('''
+            SELECT * FROM tournaments 
+            WHERE chat_id = %s
+            ORDER BY created_at DESC
+        ''', (chat_id,))
+        return [dict(row) for row in self.cursor.fetchall()]
+    
+    def update_tournament_round(self, tournament_id: int, round_num: int):
+        self.cursor.execute('UPDATE tournaments SET current_round = %s WHERE id = %s', 
+                          (round_num, tournament_id))
+        self.conn.commit()
+    
+    def get_group_standings(self, tournament_id: int, group_name: str) -> List[Dict]:
+        players = self.get_tournament_players(tournament_id)
+        players = [p for p in players if p.get('group_name') == group_name]
+        
+        matches = self.get_tournament_matches(tournament_id)
+        group_matches = [m for m in matches if m.get('group_name') == group_name]
+        
+        for p in players:
+            p['matches_played'] = 0
+            p['wins'] = 0
+            p['draws'] = 0
+            p['losses'] = 0
+            p['goals_scored'] = 0
+            p['goals_conceded'] = 0
+            p['points'] = 0
+            
+            for m in group_matches:
+                if m['status'] != 'completed':
+                    continue
+                if m['player1_id'] == p['user_id']:
+                    p['matches_played'] += 1
+                    p['goals_scored'] += m['player1_score'] or 0
+                    p['goals_conceded'] += m['player2_score'] or 0
+                    if m['winner_id'] == p['user_id']:
+                        p['wins'] += 1
+                    elif m['player1_score'] == m['player2_score']:
+                        p['draws'] += 1
+                    else:
+                        p['losses'] += 1
+                elif m['player2_id'] == p['user_id']:
+                    p['matches_played'] += 1
+                    p['goals_scored'] += m['player2_score'] or 0
+                    p['goals_conceded'] += m['player1_score'] or 0
+                    if m['winner_id'] == p['user_id']:
+                        p['wins'] += 1
+                    elif m['player1_score'] == m['player2_score']:
+                        p['draws'] += 1
+                    else:
+                        p['losses'] += 1
+            
+            p['points'] = p['wins'] * 3 + p['draws']
+        
+        players.sort(key=lambda x: (-x['points'], -(x['goals_scored'] - x['goals_conceded']), -x['goals_scored']))
+        return players
+    
+    def get_tournament_matches(self, tournament_id: int, status: str = None) -> List[Dict]:
+        query = 'SELECT * FROM matches WHERE tournament_id = %s'
+        params = [tournament_id]
+        if status:
+            query += ' AND status = %s'
+            params.append(status)
+        query += ' ORDER BY round_num, group_name, id'
+        
+        self.cursor.execute(query, params)
+        return [dict(row) for row in self.cursor.fetchall()]
+    
     def remove_player_from_tournament(self, tournament_id: int, user_id: int):
         self.cursor.execute('''
             DELETE FROM tournament_players WHERE tournament_id = %s AND user_id = %s
@@ -295,6 +417,71 @@ class Database:
             LIMIT %s
         ''', (limit,))
         return [dict(row) for row in self.cursor.fetchall()]
+    
+    def get_playoff_matches(self, tournament_id: int, stage: str = None) -> List[Dict]:
+        if stage:
+            self.cursor.execute('''
+                SELECT * FROM playoff_matches 
+                WHERE tournament_id = %s AND stage = %s
+                ORDER BY match_num
+            ''', (tournament_id, stage))
+        else:
+            self.cursor.execute('''
+                SELECT * FROM playoff_matches 
+                WHERE tournament_id = %s
+                ORDER BY 
+                    CASE stage 
+                        WHEN '1/8' THEN 1 
+                        WHEN '1/4' THEN 2 
+                        WHEN '1/2' THEN 3 
+                        WHEN 'final' THEN 4 
+                    END, match_num
+            ''', (tournament_id,))
+        
+        return [dict(row) for row in self.cursor.fetchall()]
+    
+    def add_playoff_match(self, tournament_id: int, stage: str, match_num: int, 
+                          player1_nick: str = None, player2_nick: str = None) -> int:
+        try:
+            self.cursor.execute('''
+                INSERT INTO playoff_matches (tournament_id, stage, match_num, player1_nick, player2_nick)
+                VALUES (%s, %s, %s, %s, %s)
+            ''', (tournament_id, stage, match_num, player1_nick, player2_nick))
+            self.conn.commit()
+            return self.cursor.lastval()
+        except Exception:
+            self.cursor.execute('''
+                UPDATE playoff_matches SET player1_nick = %s, player2_nick = %s
+                WHERE tournament_id = %s AND stage = %s AND match_num = %s
+            ''', (player1_nick, player2_nick, tournament_id, stage, match_num))
+            self.conn.commit()
+            return None
+    
+    def update_playoff_match(self, match_id: int, player1_wins: int = None, player2_wins: int = None,
+                             status: str = None, message_id: int = None):
+        updates = []
+        params = []
+        if player1_wins is not None:
+            updates.append('player1_wins = %s')
+            params.append(player1_wins)
+        if player2_wins is not None:
+            updates.append('player2_wins = %s')
+            params.append(player2_wins)
+        if status:
+            updates.append('status = %s')
+            params.append(status)
+        if message_id:
+            updates.append('message_id = %s')
+            params.append(message_id)
+        
+        if updates:
+            params.append(match_id)
+            self.cursor.execute(f"UPDATE playoff_matches SET {', '.join(updates)} WHERE id = %s", params)
+            self.conn.commit()
+    
+    def clear_playoff_matches(self, tournament_id: int):
+        self.cursor.execute('DELETE FROM playoff_matches WHERE tournament_id = %s', (tournament_id,))
+        self.conn.commit()
     
     def close(self):
         self.conn.close()
