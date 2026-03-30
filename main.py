@@ -1509,17 +1509,7 @@ class TournamentBot:
                 logger.info("Join message updated successfully")
             except Exception as e:
                 logger.error(f"Error updating join message: {e}")
-                try:
-                    msg = await self.application.bot.send_message(
-                        chat_id=target_chat_id,
-                        text=text,
-                        reply_markup=reply_markup,
-                        message_thread_id=topic_id
-                    )
-                    self.db.update_tournament_reg_message(tournament['id'], msg.message_id)
-                    logger.info(f"Created new reg message: {msg.message_id}")
-                except Exception as e2:
-                    logger.error(f"Error creating new reg message: {e2}")
+                logger.info("Message may be too old. Use /refreshreg to recreate.")
     
     async def cmd_start_tournament(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
