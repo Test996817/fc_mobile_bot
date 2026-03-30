@@ -113,6 +113,24 @@ class Database:
         except sqlite3.OperationalError:
             pass
         
+        try:
+            self.cursor.execute('ALTER TABLE tournaments ADD COLUMN groups_topic_id INTEGER')
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        
+        try:
+            self.cursor.execute('ALTER TABLE tournaments ADD COLUMN groups_message_id INTEGER')
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        
+        try:
+            self.cursor.execute('ALTER TABLE tournaments ADD COLUMN results_topic_id INTEGER')
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS tournament_players (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -324,6 +342,27 @@ class Database:
             players.append(p)
         return players
     
+    def get_all_players(self) -> List[Dict]:
+        self.cursor.execute('SELECT * FROM players WHERE ingame_nick IS NOT NULL ORDER BY rating DESC')
+        return [self._row_to_player(row) for row in self.cursor.fetchall()]
+    
+    def delete_tournament_matches(self, tournament_id: int):
+        self.cursor.execute('DELETE FROM matches WHERE tournament_id = ?', (tournament_id,))
+        self.conn.commit()
+    
+    def update_tournament_groups_info(self, tournament_id: int, topic_id: int, message_id: int):
+        self.cursor.execute('''
+            UPDATE tournaments SET groups_topic_id = ?, groups_message_id = ?
+            WHERE id = ?
+        ''', (topic_id, message_id, tournament_id))
+        self.conn.commit()
+    
+    def update_tournament_results_topic(self, tournament_id: int, topic_id: int):
+        self.cursor.execute('''
+            UPDATE tournaments SET results_topic_id = ? WHERE id = ?
+        ''', (topic_id, tournament_id))
+        self.conn.commit()
+    
     def add_player_to_tournament(self, tournament_id: int, user_id: int, status: str = 'pending') -> bool:
         try:
             self.cursor.execute('''
@@ -500,7 +539,7 @@ class Database:
             SELECT p.*, tp.group_name
             FROM tournament_players tp
             JOIN players p ON tp.user_id = p.user_id
-            WHERE tp.tournament_id = ? AND tp.group_name = ? AND tp.status = 'approved'
+            WHERE tp.tournament_id = ? AND tp.group_name = ? AND tp.status = 'joined'
         ''', (tournament_id, group_name))
         
         standings = []
@@ -707,18 +746,15 @@ class TournamentBot:
         self.application.add_handler(CommandHandler("tournament_create", self.cmd_create_tournament))
         self.application.add_handler(CommandHandler("tournament_start", self.cmd_start_tournament))
         self.application.add_handler(CommandHandler("tournament_end", self.cmd_end_tournament))
-        self.application.add_handler(CommandHandler("nextround", self.cmd_next_round))
         self.application.add_handler(CommandHandler("allmatches", self.cmd_matches))
-        self.application.add_handler(CommandHandler("standings", self.cmd_standings))
-        self.application.add_handler(CommandHandler("group", self.cmd_group))
         self.application.add_handler(CommandHandler("playoff", self.cmd_playoff))
         self.application.add_handler(CommandHandler("pw", self.cmd_playoff_win))
         self.application.add_handler(CommandHandler("elo", self.cmd_elo))
         self.application.add_handler(CommandHandler("tp", self.cmd_tech_loss))
         self.application.add_handler(CommandHandler("replace", self.cmd_replace))
         self.application.add_handler(CommandHandler("cancelmatch", self.cmd_cancel_match))
-        self.application.add_handler(CommandHandler("cleartournament", self.cmd_clear_tournament))
         self.application.add_handler(CommandHandler("notifyall", self.cmd_notify_all))
+        self.application.add_handler(CommandHandler("gresult", self.cmd_gresult))
         
         self.application.add_handler(MessageHandler(
             filters.Regex(r'^!nick\s+(\S.+)'), 
@@ -733,12 +769,12 @@ class TournamentBot:
             self.cmd_my_matches
         ))
         self.application.add_handler(MessageHandler(
-            filters.Regex(r'^!help'), 
-            self.cmd_help
-        ))
-        self.application.add_handler(MessageHandler(
             filters.Regex(r'^!commands'), 
             self.cmd_commands
+        ))
+        self.application.add_handler(MessageHandler(
+            filters.Regex(r'^RESULTS_TOPIC$'), 
+            self.handle_results_topic_message
         ))
         
         self.application.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
@@ -750,28 +786,150 @@ class TournamentBot:
         except Exception as e:
             logger.error(f"Failed to send admin notification: {e}")
     
-    async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        text = (
-            "📖 Команды бота:\n\n"
-            "!nick [ник] - установить игровой ник\n"
-            "!profile - твой профиль и статистика\n"
-            "!matches - твои матчи"
-        )
-        await update.message.reply_text(text)
-    
     async def cmd_commands(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             "📋 КОМАНДЫ:\n\n"
             "!nick [ник] - установить игровой ник\n"
             "!profile - твой профиль и статистика\n"
             "!matches - твои матчи\n"
-            "/standings [A/B/C/D] - таблица группы\n"
-            "/group - все группы\n"
             "/elo - таблица рейтинга\n\n"
-            "📸 Отправь скриншот с результатом:\n"
+            "📸 Отправь 4 скриншота с результатом в топик результатов:\n"
             "@Player1 - @Player2"
         )
         await update.message.reply_text(text)
+    
+    async def handle_results_topic_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            return
+        
+        chat_id = update.effective_chat.id
+        tournament = self.db.get_tournament_by_chat(chat_id)
+        
+        if not tournament:
+            await update.message.reply_text("Нет активного турнира.")
+            return
+        
+        topic_id = update.message.message_thread_id
+        if not topic_id:
+            await update.message.reply_text("Эта команда должна быть отправлена в топике.")
+            return
+        
+        self.db.update_tournament_results_topic(tournament['id'], topic_id)
+        await update.message.reply_text(f"✅ Топик результатов сохранён (ID: {topic_id})")
+    
+    def generate_groups_table(self, tournament_id: int) -> str:
+        text = "━━━━━━━━━━━━━━━━━━━━\n🏆 ГРУППОВОЙ ЭТАП\n━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        for group_key in ['A', 'B', 'C', 'D']:
+            standings = self.db.get_group_standings(tournament_id, f"Группа {group_key}")
+            
+            text += f"📊 ГРУППА {group_key}\n"
+            text += "━━━━━━━━━━━━━━━━━━━━\n"
+            text += "Игрок          | И | В | П | Н | Мячи\n"
+            text += "━━━━━━━━━━━━━━━━━━━━\n"
+            
+            if standings:
+                for p in standings:
+                    nick = (p.get('ingame_nick') or '?')[:14]
+                    nick = nick.ljust(14)
+                    matches = p.get('matches_played', 0)
+                    wins = p.get('wins', 0)
+                    losses = p.get('losses', 0)
+                    draws = p.get('draws', 0)
+                    gs = p.get('goals_scored', 0)
+                    gc = p.get('goals_conceded', 0)
+                    text += f"{nick} | {matches} | {wins} | {losses} | {draws} | {gs}:{gc}\n"
+            else:
+                text += "Пусто\n"
+            
+            text += "\n"
+        
+        return text.rstrip()
+    
+    async def send_groups_table(self, chat_id: int, tournament_id: int) -> Tuple[int, int]:
+        text = self.generate_groups_table(tournament_id)
+        
+        try:
+            msg = await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=text
+            )
+            topic_msg = await msg.reply_text("📋 Отправьте скриншоты сюда")
+            topic_id = topic_msg.message_thread_id
+            
+            self.db.update_tournament_groups_info(tournament_id, chat_id, msg.message_id)
+            
+            return topic_id, msg.message_id
+        except Exception as e:
+            logger.error(f"Error sending groups table: {e}")
+            return 0, 0
+    
+    async def update_groups_table(self, chat_id: int, message_id: int, tournament_id: int):
+        text = self.generate_groups_table(tournament_id)
+        
+        try:
+            await self.application.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text
+            )
+        except Exception as e:
+            logger.error(f"Error updating groups table: {e}")
+    
+    async def cmd_gresult(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            return
+        
+        if not context.args or len(context.args) < 3:
+            await update.message.reply_text(
+                "Использование: /gresult Player1 13-10 Player2"
+            )
+            return
+        
+        nick1 = context.args[0]
+        score_arg = context.args[1]
+        nick2 = context.args[2]
+        
+        score_match = re.match(r'(\d+)[-–:](\d+)', score_arg)
+        if not score_match:
+            await update.message.reply_text("Неверный формат счёта. Используйте: /gresult Player1 13-10 Player2")
+            return
+        
+        score1 = int(score_match.group(1))
+        score2 = int(score_match.group(2))
+        
+        tournament = self.db.get_tournament_by_chat(update.effective_chat.id)
+        if not tournament:
+            await update.message.reply_text("Нет активного турнира.")
+            return
+        
+        p1 = self.db.get_player_by_nick(nick1)
+        p2 = self.db.get_player_by_nick(nick2)
+        
+        if not p1:
+            await update.message.reply_text(f"Игрок '{nick1}' не найден.")
+            return
+        if not p2:
+            await update.message.reply_text(f"Игрок '{nick2}' не найден.")
+            return
+        
+        match = self.db.find_match_between_players(tournament['id'], p1['user_id'], p2['user_id'])
+        if not match:
+            await update.message.reply_text("Нет ожидающего матча между этими игроками.")
+            return
+        
+        if score1 > score2:
+            winner_id = p1['user_id']
+        elif score2 > score1:
+            winner_id = p2['user_id']
+        else:
+            winner_id = None
+        
+        await self.process_match_result(match, score1, score2, winner_id, update.effective_user.id)
+        
+        await update.message.reply_text(
+            f"✅ Результат записан: {nick1} {score1}:{score2} {nick2}"
+        )
     
     async def cmd_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.message.chat.type == 'private':
@@ -843,31 +1001,6 @@ class TournamentBot:
             if m['group_name']:
                 text += f"   {m['group_name']}\n"
             text += "\n"
-        
-        await update.message.reply_text(text)
-    
-    async def cmd_standings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        chat_id = update.effective_chat.id
-        tournament = self.db.get_tournament_by_chat(chat_id)
-        
-        if not tournament:
-            await update.message.reply_text("Нет активного турнира.")
-            return
-        
-        players = self.db.get_tournament_players(tournament['id'], 'approved')
-        
-        if not players:
-            await update.message.reply_text("Нет участников.")
-            return
-        
-        text = f"📊 ТАБЛИЦА '{tournament['name']}':\n\n"
-        
-        sorted_players = sorted(players, key=lambda x: (-x['rating'], -x['wins']))
-        
-        for i, p in enumerate(sorted_players[:15], 1):
-            text += f"{i}. {p['ingame_nick']}\n"
-            text += f"   ELO: {p['rating']} | В:{p['wins']} П:{p['losses']} Н:{p['draws']}\n"
-            text += f"   Голы: {p['goals_scored']}:{p['goals_conceded']}\n\n"
         
         await update.message.reply_text(text)
     
@@ -1032,6 +1165,14 @@ class TournamentBot:
         if not player:
             return
         
+        tournament = self.db.get_tournament_by_chat(update.effective_chat.id)
+        if not tournament:
+            return
+        
+        results_topic_id = tournament.get('results_topic_id')
+        if results_topic_id and update.message.message_thread_id != results_topic_id:
+            return
+        
         current_time = time.time()
         if user_id in self.cooldowns:
             last_submission = self.cooldowns[user_id]
@@ -1041,10 +1182,6 @@ class TournamentBot:
                     f"⏳ Подожди {remaining} сек. перед следующей отправкой результата."
                 )
                 return
-        
-        tournament = self.db.get_tournament_by_chat(update.effective_chat.id)
-        if not tournament:
-            return
         
         photos = update.message.photo
         
@@ -1084,8 +1221,9 @@ class TournamentBot:
             return
         
         results = []
+        unrecognized = []
         
-        for photo in photos:
+        for i, photo in enumerate(photos):
             try:
                 photo_file = await context.bot.get_file(photo.file_id)
                 photo_path = f"screenshots/match_{photo.file_id}.jpg"
@@ -1105,19 +1243,25 @@ class TournamentBot:
                     await self.process_match_result(match, score1, score2, winner_id, user_id, photo.file_id)
                     
                     winner_text = f"{nick1}" if winner_id == p1['user_id'] else f"{nick2}" if winner_id == p2['user_id'] else "Ничья"
-                    results.append(f"📸 {nick1} {score1}:{score2} {nick2} - {winner_text}")
+                    results.append(f"📸 {nick1} {score1}:{score2} {nick2}")
+                else:
+                    unrecognized.append(i + 1)
             except Exception as e:
                 logger.error(f"Error processing photo {photo.file_id}: {e}")
+                unrecognized.append(i + 1)
         
         if results:
             self.cooldowns[user_id] = current_time
-            await update.message.reply_text(
-                f"✅ Результаты ({len(results)}/{len(photos)}):\n" + "\n".join(results)
-            )
+            text = f"✅ Результаты ({len(results)}/{len(photos)}):\n"
+            text += "\n".join(results)
+            if unrecognized:
+                text += f"\n\n❌ Не распознано ({len(unrecognized)}/{len(photos)}): скриншот {', '.join(map(str, unrecognized))}"
+                text += "\nИспользуйте /gresult для ввода оставшихся результатов."
+            await update.message.reply_text(text)
         else:
             await update.message.reply_text(
                 "❌ Не удалось распознать счёт ни на одном скриншоте.\n"
-                "Убедись что счёт виден на фото."
+                "Используйте /gresult для ввода результата."
             )
     
     async def process_match_result(self, match: Dict, score1: int, score2: int,
@@ -1356,20 +1500,37 @@ class TournamentBot:
             )
             return
         
+        self.db.delete_tournament_matches(tournament['id'])
         self.db.update_tournament_status(tournament['id'], 'in_progress')
         
         format_obj = AVAILABLE_FORMATS.get(tournament['format'], AVAILABLE_FORMATS['single_elimination'])
         
         if format_obj.has_groups:
             self.create_group_stage(tournament, joined)
-            message = f"Групповой этап создан!"
+            
+            results_topic_id = tournament.get('results_topic_id')
+            if results_topic_id:
+                try:
+                    await self.application.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"🏆 Турнир '{tournament['name']}' начат!",
+                        message_thread_id=results_topic_id
+                    )
+                    await self.send_groups_table(chat_id, tournament['id'])
+                except Exception as e:
+                    logger.error(f"Error sending to results topic: {e}")
+                    await update.message.reply_text(
+                        f"🏆 Турнир '{tournament['name']}' начат!\n\nГрупповой этап создан!"
+                    )
+            else:
+                await update.message.reply_text(
+                    f"🏆 Турнир '{tournament['name']}' начат!\n\nГрупповой этап создан!"
+                )
         else:
             self.create_knockout_bracket(tournament, joined)
-            message = "Плей-офф создан!"
-        
-        await update.message.reply_text(
-            f"🏆 Турнир '{tournament['name']}' начат!\n\n{message}"
-        )
+            await update.message.reply_text(
+                f"🏆 Турнир '{tournament['name']}' начат!\n\nПлей-офф создан!"
+            )
     
     def create_group_stage(self, tournament: Dict, players: List[Dict]):
         import math
@@ -1518,52 +1679,6 @@ class TournamentBot:
         
         await update.message.reply_text(text)
     
-    async def cmd_next_round(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.db.is_admin(update.effective_user.id):
-            return
-        
-        try:
-            tournament_id = int(context.args[0]) if context.args else None
-        except ValueError:
-            tournament_id = None
-        
-        if tournament_id:
-            tournament = self.db.get_tournament(tournament_id)
-        else:
-            tournament = self.db.get_tournament_by_chat(update.effective_chat.id)
-        
-        if not tournament:
-            await update.message.reply_text("Турнир не найден.")
-            return
-        
-        current_round = tournament['current_round']
-        matches = self.db.get_tournament_matches(tournament['id'], 'pending')
-        
-        pending_in_round = [m for m in matches if m['round_num'] == current_round + 1]
-        
-        if pending_in_round:
-            await update.message.reply_text(
-                f"⚠️ Есть незавершенные матчи раунда {current_round + 1}\n"
-                f"Завершите их перед следующим раундом."
-            )
-            return
-        
-        completed_in_round = self.db.get_tournament_matches(tournament['id'], 'completed')
-        completed_in_round = [m for m in completed_in_round if m['round_num'] == current_round]
-        
-        self.db.update_tournament_round(tournament['id'], current_round + 1)
-        
-        format_obj = AVAILABLE_FORMATS.get(tournament['format'])
-        
-        if format_obj and format_obj.has_groups and current_round == 1:
-            self.create_playoffs_from_groups(tournament)
-            await update.message.reply_text(f"✅ Раунд {current_round + 1} создан!\nСозданы стыковые матчи.")
-        elif completed_in_round:
-            self.create_next_knockout_round(tournament, current_round)
-            await update.message.reply_text(f"✅ Раунд {current_round + 1} создан!")
-        else:
-            await update.message.reply_text(f"✅ Раунд {current_round + 1} стартовал!")
-    
     def create_playoffs_from_groups(self, tournament: Dict):
         groups = {}
         for player in tournament['players']:
@@ -1665,73 +1780,6 @@ class TournamentBot:
             else:
                 await query.answer("Вы не были участником", show_alert=True)
     
-    async def cmd_standings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not context.args:
-            await update.message.reply_text("Использование: /standings [A/B/C/D]")
-            return
-        
-        group_key = context.args[0].upper()
-        if group_key not in ['A', 'B', 'C', 'D']:
-            await update.message.reply_text("Использование: /standings [A/B/C/D]")
-            return
-        
-        chat_id = update.effective_chat.id
-        tournament = self.db.get_tournament_by_chat(chat_id)
-        
-        if not tournament:
-            await update.message.reply_text("Нет активного турнира.")
-            return
-        
-        standings = self.db.get_group_standings(tournament['id'], f"Группа {group_key}")
-        
-        if not standings:
-            await update.message.reply_text(f"Группа {group_key} пуста.")
-            return
-        
-        text = f"📊 ГРУППА {group_key}\n\n"
-        text += "<pre>\n"
-        text += f"{'#':<3} {'Ник':<18} {'И':>2} {'В':>2} {'Н':>2} {'П':>2} {'О':>2} {'Голы':>8}\n"
-        text += "─" * 45 + "\n"
-        
-        for i, p in enumerate(standings, 1):
-            goals = f"{p['goals_scored']}-{p['goals_conceded']}"
-            nick = (p['ingame_nick'] or p.get('nick', '?'))[:16]
-            text += f"{i:<3} {nick:<18} {p.get('games', 0):>2} {p.get('wins', 0):>2} {p.get('draws', 0):>2} {p.get('losses', 0):>2} {p.get('points', 0):>2} {goals:>8}\n"
-        
-        text += "</pre>"
-        
-        await update.message.reply_text(text, parse_mode='HTML')
-    
-    async def cmd_group(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        chat_id = update.effective_chat.id
-        tournament = self.db.get_tournament_by_chat(chat_id)
-        
-        if not tournament:
-            await update.message.reply_text("Нет активного турнира.")
-            return
-        
-        text = ""
-        
-        for group_key in ['A', 'B', 'C', 'D']:
-            standings = self.db.get_group_standings(tournament['id'], f"Группа {group_key}")
-            
-            text += f"📊 ГРУППА {group_key}\n\n"
-            text += "<pre>\n"
-            text += f"{'#':<3} {'Ник':<18} {'И':>2} {'В':>2} {'Н':>2} {'П':>2} {'О':>2} {'Голы':>8}\n"
-            text += "─" * 45 + "\n"
-            
-            if standings:
-                for i, p in enumerate(standings, 1):
-                    goals = f"{p['goals_scored']}-{p['goals_conceded']}"
-                    nick = (p['ingame_nick'] or p.get('nick', '?'))[:16]
-                    text += f"{i:<3} {nick:<18} {p.get('games', 0):>2} {p.get('wins', 0):>2} {p.get('draws', 0):>2} {p.get('losses', 0):>2} {p.get('points', 0):>2} {goals:>8}\n"
-            else:
-                text += "Пусто\n"
-            
-            text += "</pre>\n\n"
-        
-        await update.message.reply_text(text, parse_mode='HTML')
-    
     async def cmd_elo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         top = self.db.get_top_players(50)
         
@@ -1789,13 +1837,6 @@ class TournamentBot:
         
         await update.message.reply_text("Матч отменён.")
 
-    async def cmd_clear_tournament(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.db.is_admin(update.effective_user.id):
-            return
-        
-        self.db.clear_all_tournaments()
-        await update.message.reply_text("Все турниры и счётчики сброшены.")
-    
     async def cmd_notify_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
             return
@@ -1809,18 +1850,20 @@ class TournamentBot:
         
         all_players = self.db.get_tournament_players(tournament['id'])
         joined = [p for p in all_players if p.get('tournament_status') == 'joined']
+        joined_ids = {p['user_id'] for p in joined}
+        
+        all_players_with_nick = self.db.get_all_players()
+        not_joined = [p for p in all_players_with_nick if p['user_id'] not in joined_ids]
         
         text = "📢 ВСЕ НА РЕГИСТРАЦИЮ!\n\n"
         text += f"🏆 {tournament['name']}\n"
         text += f"📊 Зарегистрировано: {len(joined)}/{tournament['max_players']}\n\n"
         
-        if joined:
-            text += "Участники:\n"
-            for i, p in enumerate(joined, 1):
-                text += f"  {i}. {p.get('ingame_nick', 'Unknown')}\n"
-            text += "\n"
+        if not_joined:
+            mentions = " ".join(f"@{p.get('ingame_nick', 'unknown')}" for p in not_joined)
+            text += f"Не зарегистрированы: {mentions}\n\n"
         
-        text += "❗️ Ещё не зарегистрировались - нажмите кнопку ниже!"
+        text += "❗️ Нажмите кнопку ниже чтобы присоединиться!"
         
         keyboard = [
             [InlineKeyboardButton("✅ ПРИСОЕДИНИТЬСЯ", callback_data="join_tournament")]
@@ -1831,8 +1874,7 @@ class TournamentBot:
             await self.application.bot.send_message(
                 chat_id=chat_id,
                 text=text,
-                reply_markup=reply_markup,
-                message_thread_id=tournament.get('topic_id')
+                reply_markup=reply_markup
             )
         except Exception as e:
             logger.error(f"Error sending notify: {e}")

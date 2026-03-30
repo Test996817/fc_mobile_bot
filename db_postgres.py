@@ -164,6 +164,27 @@ class Database:
             END $$;
         ''')
         
+        self.cursor.execute('''
+            DO $$ BEGIN
+                ALTER TABLE tournaments ADD COLUMN groups_topic_id INTEGER;
+            EXCEPTION WHEN others THEN NULL;
+            END $$;
+        ''')
+        
+        self.cursor.execute('''
+            DO $$ BEGIN
+                ALTER TABLE tournaments ADD COLUMN groups_message_id INTEGER;
+            EXCEPTION WHEN others THEN NULL;
+            END $$;
+        ''')
+        
+        self.cursor.execute('''
+            DO $$ BEGIN
+                ALTER TABLE tournaments ADD COLUMN results_topic_id INTEGER;
+            EXCEPTION WHEN others THEN NULL;
+            END $$;
+        ''')
+        
         self.conn.commit()
     
     def add_player(self, user_id: int, username: str, ingame_nick: str = None) -> bool:
@@ -286,6 +307,27 @@ class Database:
         self.cursor.execute(query, params)
         return [dict(row) for row in self.cursor.fetchall()]
     
+    def get_all_players(self) -> List[Dict]:
+        self.cursor.execute('SELECT * FROM players WHERE ingame_nick IS NOT NULL ORDER BY rating DESC')
+        return [dict(row) for row in self.cursor.fetchall()]
+    
+    def delete_tournament_matches(self, tournament_id: int):
+        self.cursor.execute('DELETE FROM matches WHERE tournament_id = %s', (tournament_id,))
+        self.conn.commit()
+    
+    def update_tournament_groups_info(self, tournament_id: int, topic_id: int, message_id: int):
+        self.cursor.execute('''
+            UPDATE tournaments SET groups_topic_id = %s, groups_message_id = %s
+            WHERE id = %s
+        ''', (topic_id, message_id, tournament_id))
+        self.conn.commit()
+    
+    def update_tournament_results_topic(self, tournament_id: int, topic_id: int):
+        self.cursor.execute('''
+            UPDATE tournaments SET results_topic_id = %s WHERE id = %s
+        ''', (topic_id, tournament_id))
+        self.conn.commit()
+    
     def update_tournament_player_status(self, tournament_id: int, user_id: int, 
                                        status: str, approved_by: int = None):
         self.cursor.execute('''
@@ -309,7 +351,7 @@ class Database:
         self.conn.commit()
     
     def get_group_standings(self, tournament_id: int, group_name: str) -> List[Dict]:
-        players = self.get_tournament_players(tournament_id)
+        players = self.get_tournament_players(tournament_id, status='joined')
         players = [p for p in players if p.get('group_name') == group_name]
         
         matches = self.get_tournament_matches(tournament_id)
