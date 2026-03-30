@@ -80,6 +80,10 @@ class Database:
                 created_by BIGINT NOT NULL,
                 playoff_message_id INTEGER,
                 topic_id INTEGER,
+                groups_topic_id INTEGER,
+                groups_message_id INTEGER,
+                results_topic_id INTEGER,
+                reg_message_id INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -94,6 +98,22 @@ class Database:
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
                                WHERE table_name='tournaments' AND column_name='playoff_message_id') THEN
                     ALTER TABLE tournaments ADD COLUMN playoff_message_id INTEGER;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                               WHERE table_name='tournaments' AND column_name='groups_topic_id') THEN
+                    ALTER TABLE tournaments ADD COLUMN groups_topic_id INTEGER;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                               WHERE table_name='tournaments' AND column_name='groups_message_id') THEN
+                    ALTER TABLE tournaments ADD COLUMN groups_message_id INTEGER;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                               WHERE table_name='tournaments' AND column_name='results_topic_id') THEN
+                    ALTER TABLE tournaments ADD COLUMN results_topic_id INTEGER;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                               WHERE table_name='tournaments' AND column_name='reg_message_id') THEN
+                    ALTER TABLE tournaments ADD COLUMN reg_message_id INTEGER;
                 END IF;
             END
             $$;
@@ -326,6 +346,12 @@ class Database:
         self.cursor.execute('''
             UPDATE tournaments SET results_topic_id = %s WHERE id = %s
         ''', (topic_id, tournament_id))
+        self.conn.commit()
+    
+    def update_tournament_reg_message(self, tournament_id: int, message_id: int):
+        self.cursor.execute('''
+            UPDATE tournaments SET reg_message_id = %s WHERE id = %s
+        ''', (message_id, tournament_id))
         self.conn.commit()
     
     def update_tournament_player_status(self, tournament_id: int, user_id: int, 

@@ -131,6 +131,12 @@ class Database:
         except sqlite3.OperationalError:
             pass
         
+        try:
+            self.cursor.execute('ALTER TABLE tournaments ADD COLUMN reg_message_id INTEGER')
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS tournament_players (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -361,6 +367,12 @@ class Database:
         self.cursor.execute('''
             UPDATE tournaments SET results_topic_id = ? WHERE id = ?
         ''', (topic_id, tournament_id))
+        self.conn.commit()
+    
+    def update_tournament_reg_message(self, tournament_id: int, message_id: int):
+        self.cursor.execute('''
+            UPDATE tournaments SET reg_message_id = ? WHERE id = ?
+        ''', (message_id, tournament_id))
         self.conn.commit()
     
     def add_player_to_tournament(self, tournament_id: int, user_id: int, status: str = 'pending') -> bool:
@@ -1424,12 +1436,11 @@ class TournamentBot:
                 reply_markup=reply_markup,
                 message_thread_id=tournament.get('topic_id')
             )
-            self.join_message_id = msg.message_id
-            self.join_chat_id = chat_id
+            self.db.update_tournament_reg_message(tournament_id, msg.message_id)
         except Exception as e:
             logger.error(f"Error sending join message: {e}")
     
-    async def update_join_message(self, chat_id: int, tournament_id: int):
+    async def update_join_message(self, tournament_id: int):
         tournament = self.db.get_tournament(tournament_id)
         if not tournament:
             return
@@ -1457,13 +1468,14 @@ class TournamentBot:
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        target_chat_id = chat_id if chat_id else self.join_chat_id
+        reg_message_id = tournament.get('reg_message_id')
+        target_chat_id = tournament.get('chat_id')
         
-        if self.join_message_id and target_chat_id:
+        if reg_message_id and target_chat_id:
             try:
                 await self.application.bot.edit_message_text(
                     chat_id=target_chat_id,
-                    message_id=self.join_message_id,
+                    message_id=reg_message_id,
                     text=text,
                     reply_markup=reply_markup
                 )
@@ -1753,11 +1765,11 @@ class TournamentBot:
                     await query.answer("Вы уже участник!", show_alert=True)
                 else:
                     self.db.update_tournament_player_status(tournament['id'], user_id, 'joined', user_id)
-                    await self.update_join_message(self.join_chat_id, tournament['id'])
+                    await self.update_join_message(tournament['id'])
                     await query.answer("Вы присоединились!")
             else:
                 self.db.add_player_to_tournament(tournament['id'], user_id, 'joined')
-                await self.update_join_message(self.join_chat_id, tournament['id'])
+                await self.update_join_message(tournament['id'])
                 await query.answer("Вы присоединились!")
         
         elif data == "leave_tournament":
@@ -1775,7 +1787,7 @@ class TournamentBot:
             existing = self.db.get_player_tournament_status(tournament['id'], user_id)
             if existing and existing['tournament_status'] == 'joined':
                 self.db.remove_player_from_tournament(tournament['id'], user_id)
-                await self.update_join_message(self.join_chat_id, tournament['id'])
+                await self.update_join_message(tournament['id'])
                 await query.answer("Вы покинули турнир!")
             else:
                 await query.answer("Вы не были участником", show_alert=True)
