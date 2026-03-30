@@ -1874,7 +1874,8 @@ class TournamentBot:
             await self.application.bot.send_message(
                 chat_id=chat_id,
                 text=text,
-                reply_markup=reply_markup
+                reply_markup=reply_markup,
+                message_thread_id=update.message.message_thread_id
             )
         except Exception as e:
             logger.error(f"Error sending notify: {e}")
