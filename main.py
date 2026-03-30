@@ -314,7 +314,13 @@ class Database:
             'current_round': row[8],
             'groups_count': row[9],
             'created_by': row[10],
-            'players': players
+            'players': players,
+            'topic_id': row[11] if len(row) > 11 else None,
+            'playoff_message_id': row[12] if len(row) > 12 else None,
+            'groups_topic_id': row[13] if len(row) > 13 else None,
+            'groups_message_id': row[14] if len(row) > 14 else None,
+            'results_topic_id': row[15] if len(row) > 15 else None,
+            'reg_message_id': row[16] if len(row) > 16 else None,
         }
     
     def update_tournament_status(self, tournament_id: int, status: str):

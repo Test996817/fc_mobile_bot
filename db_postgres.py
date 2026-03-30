@@ -274,7 +274,9 @@ class Database:
         ''')
         row = self.cursor.fetchone()
         if row:
-            return dict(row)
+            result = dict(row)
+            result['players'] = self.get_tournament_players(row['id'])
+            return result
         
         self.cursor.execute('''
             SELECT * FROM tournaments 
@@ -282,7 +284,11 @@ class Database:
             ORDER BY created_at DESC LIMIT 1
         ''')
         row = self.cursor.fetchone()
-        return dict(row) if row else None
+        if row:
+            result = dict(row)
+            result['players'] = self.get_tournament_players(row['id'])
+            return result
+        return None
     
     def update_tournament_status(self, tournament_id: int, status: str):
         self.cursor.execute('UPDATE tournaments SET status = %s WHERE id = %s', 
