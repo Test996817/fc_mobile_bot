@@ -1476,6 +1476,9 @@ class TournamentBot:
         
         reg_message_id = tournament.get('reg_message_id')
         target_chat_id = tournament.get('chat_id')
+        topic_id = tournament.get('topic_id')
+        
+        logger.info(f"Updating join message: reg_message_id={reg_message_id}, chat_id={target_chat_id}, topic_id={topic_id}")
         
         if reg_message_id and target_chat_id:
             try:
@@ -1483,8 +1486,10 @@ class TournamentBot:
                     chat_id=target_chat_id,
                     message_id=reg_message_id,
                     text=text,
-                    reply_markup=reply_markup
+                    reply_markup=reply_markup,
+                    message_thread_id=topic_id
                 )
+                logger.info("Join message updated successfully")
             except Exception as e:
                 logger.error(f"Error updating join message: {e}")
     
