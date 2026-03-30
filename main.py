@@ -773,6 +773,7 @@ class TournamentBot:
         self.application.add_handler(CommandHandler("cancelmatch", self.cmd_cancel_match))
         self.application.add_handler(CommandHandler("notifyall", self.cmd_notify_all))
         self.application.add_handler(CommandHandler("gresult", self.cmd_gresult))
+        self.application.add_handler(CommandHandler("refreshreg", self.cmd_refresh_reg))
         
         self.application.add_handler(MessageHandler(
             filters.Regex(r'^!nick\s+(\S.+)'), 
@@ -948,6 +949,22 @@ class TournamentBot:
         await update.message.reply_text(
             f"✅ Результат записан: {nick1} {score1}:{score2} {nick2}"
         )
+    
+    async def cmd_refresh_reg(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            return
+        
+        tournament = self.db.get_tournament_by_chat(update.effective_chat.id)
+        if not tournament:
+            await update.message.reply_text("Нет активного турнира.")
+            return
+        
+        if tournament['status'] != 'registration':
+            await update.message.reply_text("Регистрация закрыта.")
+            return
+        
+        await self.send_join_message(update.effective_chat.id, tournament['id'])
+        await update.message.reply_text("✅ Сообщение с регистрацией обновлено!")
     
     async def cmd_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.message.chat.type == 'private':
@@ -1492,6 +1509,17 @@ class TournamentBot:
                 logger.info("Join message updated successfully")
             except Exception as e:
                 logger.error(f"Error updating join message: {e}")
+                try:
+                    msg = await self.application.bot.send_message(
+                        chat_id=target_chat_id,
+                        text=text,
+                        reply_markup=reply_markup,
+                        message_thread_id=topic_id
+                    )
+                    self.db.update_tournament_reg_message(tournament['id'], msg.message_id)
+                    logger.info(f"Created new reg message: {msg.message_id}")
+                except Exception as e2:
+                    logger.error(f"Error creating new reg message: {e2}")
     
     async def cmd_start_tournament(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
