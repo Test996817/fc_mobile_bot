@@ -817,6 +817,9 @@ class TournamentBot:
         self.application.add_handler(CommandHandler("notifyall", self.cmd_notify_all))
         self.application.add_handler(CommandHandler("gresult", self.cmd_gresult))
         self.application.add_handler(CommandHandler("refreshreg", self.cmd_refresh_reg))
+        self.application.add_handler(CommandHandler("tinfo", self.cmd_tinfo))
+        self.application.add_handler(CommandHandler("dbstats", self.cmd_dbstats))
+        self.application.add_handler(CommandHandler("finalpost", self.cmd_finalpost))
         
         self.application.add_handler(MessageHandler(
             filters.Regex(r'^!nick\s+(\S.+)'), 
@@ -862,6 +865,7 @@ class TournamentBot:
     
     async def handle_results_topic_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
             return
         
         chat_id = update.effective_chat.id
@@ -996,6 +1000,7 @@ class TournamentBot:
     
     async def cmd_refresh_reg(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
             return
         
         tournament = self.db.get_tournament_by_chat(update.effective_chat.id)
@@ -1399,15 +1404,16 @@ class TournamentBot:
             "/tournament_create Название - создать турнир\n"
             "/tournament_start - начать турнир\n"
             "/tournament_end - завершить турнир\n"
-            "/standings [A/B/C/D] - таблица группы\n"
-            "/group - все 4 группы\n"
             "/elo - таблица рейтинга\n"
             "/tp [ник] - тех. поражение\n"
             "/replace [old] [new] - замена\n"
             "/cancelmatch [ник1] [ник2] - отмена\n"
             "/playoff - генерация плей-офф\n"
             "/pw [стадия] [№] [ник] [счёт] - результат\n"
-            "/allmatches - все матчи"
+            "/allmatches - все матчи\n"
+            "/tinfo [ID] - информация по турниру\n"
+            "/finalpost [ID] - отправить финальный пост\n"
+            "/dbstats - статистика базы"
         )
         await update.message.reply_text(text)
     
@@ -1558,6 +1564,7 @@ class TournamentBot:
     
     async def cmd_start_tournament(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
             return
         
         try:
@@ -1686,6 +1693,7 @@ class TournamentBot:
     
     async def cmd_end_tournament(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
             return
         
         try:
@@ -1718,6 +1726,7 @@ class TournamentBot:
     
     async def cmd_list_tournaments(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
             return
         
         chat_id = update.effective_chat.id
@@ -1735,9 +1744,129 @@ class TournamentBot:
             text += f"   Игроков: {len(t['players'])}/{t['max_players'] or '∞'}\n\n"
         
         await update.message.reply_text(text)
-    
+
+    async def cmd_tinfo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        try:
+            tournament_id = int(context.args[0]) if context.args else None
+        except ValueError:
+            await update.message.reply_text("Использование: /tinfo [ID]")
+            return
+
+        if tournament_id:
+            tournament = self.db.get_tournament(tournament_id)
+        else:
+            tournament = self.db.get_tournament_by_chat(update.effective_chat.id)
+
+        if not tournament:
+            await update.message.reply_text("Турнир не найден.")
+            return
+
+        matches = self.db.get_tournament_matches(tournament['id'])
+        pending = len([m for m in matches if m['status'] == 'pending'])
+        in_progress = len([m for m in matches if m['status'] == 'in_progress'])
+        completed = len([m for m in matches if m['status'] == 'completed'])
+        joined = [p for p in tournament['players'] if p['tournament_status'] == 'joined']
+
+        playoff_matches = self.db.get_playoff_matches(tournament['id'])
+        playoff_completed = len([m for m in playoff_matches if m.get('status') == 'completed'])
+
+        text = (
+            f"📌 ТУРНИР #{tournament['id']}\n\n"
+            f"Название: {tournament['name']}\n"
+            f"Формат: {tournament['format']}\n"
+            f"Статус: {tournament['status']}\n"
+            f"Раунд: {tournament.get('current_round', 0)}\n"
+            f"Участников: {len(joined)}/{tournament.get('max_players') or '∞'}\n\n"
+            f"Матчи:\n"
+            f"- pending: {pending}\n"
+            f"- in_progress: {in_progress}\n"
+            f"- completed: {completed}\n\n"
+            f"Плей-офф: {playoff_completed}/{len(playoff_matches)} завершено\n"
+            f"topic_id: {tournament.get('topic_id')}\n"
+            f"results_topic_id: {tournament.get('results_topic_id')}\n"
+            f"reg_message_id: {tournament.get('reg_message_id')}"
+        )
+        await update.message.reply_text(text)
+
+    async def cmd_finalpost(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        try:
+            tournament_id = int(context.args[0]) if context.args else None
+        except ValueError:
+            await update.message.reply_text("Использование: /finalpost [ID]")
+            return
+
+        if tournament_id:
+            tournament = self.db.get_tournament(tournament_id)
+        else:
+            tournament = self.db.get_tournament_by_chat(update.effective_chat.id)
+
+        if not tournament:
+            await update.message.reply_text("Турнир не найден.")
+            return
+
+        final_post = self.build_tournament_final_post(tournament)
+        await self.application.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=final_post,
+            message_thread_id=update.message.message_thread_id
+        )
+        await update.message.reply_text("✅ Финальный пост отправлен.")
+
+    async def cmd_dbstats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        tables = [
+            'players', 'tournaments', 'tournament_players',
+            'matches', 'playoff_matches', 'tournament_rating_snapshots'
+        ]
+
+        counts = {}
+        for table in tables:
+            try:
+                self.db.cursor.execute(f'SELECT COUNT(*) FROM {table}')
+                row = self.db.cursor.fetchone()
+                counts[table] = row[0] if row is not None else 0
+            except Exception:
+                counts[table] = 'n/a'
+
+        size_text = 'n/a'
+        try:
+            if USE_POSTGRES:
+                self.db.cursor.execute("SELECT pg_database_size(current_database())")
+                row = self.db.cursor.fetchone()
+                size_bytes = row[0] if row is not None else 0
+            else:
+                db_path = os.path.join(os.getcwd(), 'tournament_bot.db')
+                size_bytes = os.path.getsize(db_path) if os.path.exists(db_path) else 0
+            size_text = f"{size_bytes / (1024 * 1024):.2f} MB"
+        except Exception:
+            pass
+
+        text = (
+            "🗄️ DB STATS\n\n"
+            f"Размер базы: {size_text}\n\n"
+            f"players: {counts['players']}\n"
+            f"tournaments: {counts['tournaments']}\n"
+            f"tournament_players: {counts['tournament_players']}\n"
+            f"matches: {counts['matches']}\n"
+            f"playoff_matches: {counts['playoff_matches']}\n"
+            f"rating_snapshots: {counts['tournament_rating_snapshots']}"
+        )
+        await update.message.reply_text(text)
+
     async def cmd_matches(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
             return
         
         try:
@@ -1900,6 +2029,7 @@ class TournamentBot:
     
     async def cmd_tech_loss(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
             return
         
         if not context.args:
@@ -1931,6 +2061,7 @@ class TournamentBot:
     
     async def cmd_replace(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
             return
         
         if len(context.args) < 2:
@@ -1941,6 +2072,7 @@ class TournamentBot:
     
     async def cmd_cancel_match(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
             return
         
         if len(context.args) < 2:
@@ -1951,6 +2083,7 @@ class TournamentBot:
 
     async def cmd_notify_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
             return
         
         chat_id = update.effective_chat.id
@@ -1995,6 +2128,7 @@ class TournamentBot:
     
     async def cmd_playoff(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
             return
         
         chat_id = update.effective_chat.id
@@ -2241,6 +2375,7 @@ class TournamentBot:
     
     async def cmd_playoff_win(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
             return
         
         if not context.args or len(context.args) < 3:
