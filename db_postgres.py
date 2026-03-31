@@ -176,6 +176,16 @@ class Database:
                 UNIQUE(tournament_id, stage, match_num)
             )
         ''')
+
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS tournament_rating_snapshots (
+                tournament_id INTEGER NOT NULL,
+                user_id BIGINT NOT NULL,
+                rating_start INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (tournament_id, user_id)
+            )
+        ''')
         
         self.cursor.execute('''
             DO $$ BEGIN
@@ -269,9 +279,9 @@ class Database:
     def get_tournament_by_chat(self, chat_id: int) -> Optional[Dict]:
         self.cursor.execute('''
             SELECT * FROM tournaments 
-            WHERE status = 'registration'
+            WHERE chat_id = %s AND status = 'registration'
             ORDER BY created_at DESC LIMIT 1
-        ''')
+        ''', (chat_id,))
         row = self.cursor.fetchone()
         if row:
             result = dict(row)
@@ -280,9 +290,9 @@ class Database:
         
         self.cursor.execute('''
             SELECT * FROM tournaments 
-            WHERE status = 'in_progress'
+            WHERE chat_id = %s AND status = 'in_progress'
             ORDER BY created_at DESC LIMIT 1
-        ''')
+        ''', (chat_id,))
         row = self.cursor.fetchone()
         if row:
             result = dict(row)
@@ -530,7 +540,8 @@ class Database:
                         WHEN '1/8' THEN 1 
                         WHEN '1/4' THEN 2 
                         WHEN '1/2' THEN 3 
-                        WHEN 'final' THEN 4 
+                        WHEN 'bronze' THEN 4
+                        WHEN 'final' THEN 5 
                     END, match_num
             ''', (tournament_id,))
         
@@ -579,6 +590,31 @@ class Database:
     def clear_playoff_matches(self, tournament_id: int):
         self.cursor.execute('DELETE FROM playoff_matches WHERE tournament_id = %s', (tournament_id,))
         self.conn.commit()
+
+    def snapshot_tournament_ratings(self, tournament_id: int, user_ids: List[int]):
+        self.cursor.execute('DELETE FROM tournament_rating_snapshots WHERE tournament_id = %s', (tournament_id,))
+        for user_id in user_ids:
+            self.cursor.execute('SELECT rating FROM players WHERE user_id = %s', (user_id,))
+            row = self.cursor.fetchone()
+            if row:
+                rating = row['rating'] if isinstance(row, dict) else row[0]
+                self.cursor.execute('''
+                    INSERT INTO tournament_rating_snapshots (tournament_id, user_id, rating_start)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (tournament_id, user_id) DO UPDATE SET rating_start = EXCLUDED.rating_start
+                ''', (tournament_id, user_id, rating))
+        self.conn.commit()
+
+    def get_tournament_rating_gains(self, tournament_id: int) -> List[Dict]:
+        self.cursor.execute('''
+            SELECT s.user_id, p.ingame_nick, s.rating_start, p.rating AS rating_end,
+                   (p.rating - s.rating_start) AS gain
+            FROM tournament_rating_snapshots s
+            JOIN players p ON p.user_id = s.user_id
+            WHERE s.tournament_id = %s
+            ORDER BY gain DESC, p.ingame_nick ASC
+        ''', (tournament_id,))
+        return [dict(row) for row in self.cursor.fetchall()]
     
     def close(self):
         self.conn.close()

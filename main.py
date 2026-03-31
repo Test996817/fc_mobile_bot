@@ -194,6 +194,16 @@ class Database:
                 UNIQUE(tournament_id, stage, match_num)
             )
         ''')
+
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS tournament_rating_snapshots (
+                tournament_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                rating_start INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (tournament_id, user_id)
+            )
+        ''')
         
         self.conn.commit()
     
@@ -272,20 +282,18 @@ class Database:
     def get_tournament_by_chat(self, chat_id: int) -> Optional[Dict]:
         self.cursor.execute('''
             SELECT * FROM tournaments 
-            WHERE status = 'registration'
+            WHERE chat_id = ? AND status = 'registration'
             ORDER BY created_at DESC LIMIT 1
-        ''')
+        ''', (chat_id,))
         row = self.cursor.fetchone()
         if row:
-            self.cursor.execute('UPDATE tournaments SET chat_id = ? WHERE id = ?', (chat_id, row[0]))
-            self.conn.commit()
             return self._row_to_tournament(row)
         
         self.cursor.execute('''
             SELECT * FROM tournaments 
-            WHERE status = 'in_progress'
+            WHERE chat_id = ? AND status = 'in_progress'
             ORDER BY created_at DESC LIMIT 1
-        ''')
+        ''', (chat_id,))
         row = self.cursor.fetchone()
         if row:
             return self._row_to_tournament(row)
@@ -594,7 +602,8 @@ class Database:
                         WHEN '1/8' THEN 1 
                         WHEN '1/4' THEN 2 
                         WHEN '1/2' THEN 3 
-                        WHEN 'final' THEN 4 
+                        WHEN 'bronze' THEN 4
+                        WHEN 'final' THEN 5 
                     END, match_num
             ''', (tournament_id,))
         
@@ -645,9 +654,43 @@ class Database:
         self.cursor.execute('DELETE FROM playoff_matches WHERE tournament_id = ?', (tournament_id,))
         self.conn.commit()
 
+    def snapshot_tournament_ratings(self, tournament_id: int, user_ids: List[int]):
+        self.cursor.execute('DELETE FROM tournament_rating_snapshots WHERE tournament_id = ?', (tournament_id,))
+        for user_id in user_ids:
+            self.cursor.execute('SELECT rating FROM players WHERE user_id = ?', (user_id,))
+            row = self.cursor.fetchone()
+            if row:
+                self.cursor.execute('''
+                    INSERT OR REPLACE INTO tournament_rating_snapshots (tournament_id, user_id, rating_start)
+                    VALUES (?, ?, ?)
+                ''', (tournament_id, user_id, row[0]))
+        self.conn.commit()
+
+    def get_tournament_rating_gains(self, tournament_id: int) -> List[Dict]:
+        self.cursor.execute('''
+            SELECT s.user_id, p.ingame_nick, s.rating_start, p.rating AS rating_end,
+                   (p.rating - s.rating_start) AS gain
+            FROM tournament_rating_snapshots s
+            JOIN players p ON p.user_id = s.user_id
+            WHERE s.tournament_id = ?
+            ORDER BY gain DESC, p.ingame_nick ASC
+        ''', (tournament_id,))
+        rows = self.cursor.fetchall()
+        return [
+            {
+                'user_id': row[0],
+                'ingame_nick': row[1],
+                'rating_start': row[2],
+                'rating_end': row[3],
+                'gain': row[4],
+            }
+            for row in rows
+        ]
+
     def delete_tournament(self, tournament_id: int):
         self.cursor.execute('DELETE FROM matches WHERE tournament_id = ?', (tournament_id,))
         self.cursor.execute('DELETE FROM playoff_matches WHERE tournament_id = ?', (tournament_id,))
+        self.cursor.execute('DELETE FROM tournament_rating_snapshots WHERE tournament_id = ?', (tournament_id,))
         self.cursor.execute('DELETE FROM tournament_players WHERE tournament_id = ?', (tournament_id,))
         self.cursor.execute('DELETE FROM tournaments WHERE id = ?', (tournament_id,))
         self.conn.commit()
@@ -897,6 +940,7 @@ class TournamentBot:
     
     async def cmd_gresult(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда /gresult доступна только админам.")
             return
         
         if not context.args or len(context.args) < 3:
@@ -1206,6 +1250,7 @@ class TournamentBot:
         
         results_topic_id = tournament.get('results_topic_id')
         if results_topic_id and update.message.message_thread_id != results_topic_id:
+            await update.message.reply_text("❌ Результаты принимаются только в топике результатов.")
             return
         
         current_time = time.time()
@@ -1540,6 +1585,11 @@ class TournamentBot:
                 f"зарегистрировано {len(joined)}"
             )
             return
+
+        self.db.snapshot_tournament_ratings(
+            tournament['id'],
+            [p['user_id'] for p in joined]
+        )
         
         self.db.delete_tournament_matches(tournament['id'])
         self.db.update_tournament_status(tournament['id'], 'in_progress')
@@ -1654,6 +1704,13 @@ class TournamentBot:
             return
         
         self.db.update_tournament_status(tournament['id'], 'completed')
+
+        final_post = self.build_tournament_final_post(tournament)
+        await self.application.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=final_post,
+            message_thread_id=update.message.message_thread_id
+        )
         
         await update.message.reply_text(
             f"🏆 Турнир '{tournament['name']}' завершён!"
@@ -1849,6 +1906,11 @@ class TournamentBot:
             await update.message.reply_text("Использование: /tp [ник]")
             return
         
+        tournament = self.db.get_tournament_by_chat(update.effective_chat.id)
+        if not tournament:
+            await update.message.reply_text("Нет активного турнира в этом чате.")
+            return
+        
         nick = context.args[0]
         player = self.db.get_player_by_nick(nick)
         
@@ -1856,7 +1918,16 @@ class TournamentBot:
             await update.message.reply_text(f"Игрок '{nick}' не найден.")
             return
         
-        await update.message.reply_text(f"Техническое поражение для {nick}.")
+        participant = self.db.get_player_tournament_status(tournament['id'], player['user_id'])
+        if not participant or participant.get('tournament_status') != 'joined':
+            await update.message.reply_text(
+                f"Игрок '{nick}' не участвует в турнире '{tournament['name']}' этого чата."
+            )
+            return
+        
+        await update.message.reply_text(
+            f"Техническое поражение для {nick} в турнире '{tournament['name']}'."
+        )
     
     async def cmd_replace(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
@@ -1961,9 +2032,174 @@ class TournamentBot:
             (msg.message_id, tournament['id'])
         )
         self.db.conn.commit()
-    
+
+    def set_playoff_match_slot(self, tournament_id: int, stage: str, match_num: int, slot: int, nick: str):
+        matches = self.db.get_playoff_matches(tournament_id, stage)
+        existing = next((m for m in matches if m['match_num'] == match_num), None)
+        p1 = existing['player1_nick'] if existing else None
+        p2 = existing['player2_nick'] if existing else None
+        if slot == 1:
+            p1 = nick
+        else:
+            p2 = nick
+        self.db.add_playoff_match(tournament_id, stage, match_num, p1, p2)
+
+    def advance_playoff(self, tournament_id: int, stage: str, match_num: int, winner_nick: str, loser_nick: str):
+        if stage == '1/8':
+            target_match = (match_num + 1) // 2
+            slot = 1 if match_num % 2 == 1 else 2
+            self.set_playoff_match_slot(tournament_id, '1/4', target_match, slot, winner_nick)
+        elif stage == '1/4':
+            target_match = (match_num + 1) // 2
+            slot = 1 if match_num % 2 == 1 else 2
+            self.set_playoff_match_slot(tournament_id, '1/2', target_match, slot, winner_nick)
+        elif stage == '1/2':
+            final_slot = 1 if match_num == 1 else 2
+            bronze_slot = 1 if match_num == 1 else 2
+            self.set_playoff_match_slot(tournament_id, 'final', 1, final_slot, winner_nick)
+            self.set_playoff_match_slot(tournament_id, 'bronze', 1, bronze_slot, loser_nick)
+
+    def get_tournament_player_stats(self, tournament_id: int) -> Dict[int, Dict]:
+        stats = {}
+        matches = self.db.get_tournament_matches(tournament_id, 'completed')
+
+        for m in matches:
+            p1_id = m['player1_id']
+            p2_id = m['player2_id']
+            s1 = m['player1_score'] or 0
+            s2 = m['player2_score'] or 0
+
+            if p1_id not in stats:
+                stats[p1_id] = {'matches': 0, 'wins': 0, 'draws': 0, 'losses': 0, 'goals_scored': 0, 'goals_conceded': 0}
+            if p2_id not in stats:
+                stats[p2_id] = {'matches': 0, 'wins': 0, 'draws': 0, 'losses': 0, 'goals_scored': 0, 'goals_conceded': 0}
+
+            stats[p1_id]['matches'] += 1
+            stats[p2_id]['matches'] += 1
+            stats[p1_id]['goals_scored'] += s1
+            stats[p1_id]['goals_conceded'] += s2
+            stats[p2_id]['goals_scored'] += s2
+            stats[p2_id]['goals_conceded'] += s1
+
+            if s1 > s2:
+                stats[p1_id]['wins'] += 1
+                stats[p2_id]['losses'] += 1
+            elif s2 > s1:
+                stats[p2_id]['wins'] += 1
+                stats[p1_id]['losses'] += 1
+            else:
+                stats[p1_id]['draws'] += 1
+                stats[p2_id]['draws'] += 1
+
+        return stats
+
+    def build_tournament_final_post(self, tournament: Dict) -> str:
+        tournament_id = tournament['id']
+        date_str = datetime.now().strftime('%d.%m.%Y')
+        joined = [p for p in tournament['players'] if p['tournament_status'] == 'joined']
+        stats = self.get_tournament_player_stats(tournament_id)
+
+        final_matches = self.db.get_playoff_matches(tournament_id, 'final')
+        bronze_matches = self.db.get_playoff_matches(tournament_id, 'bronze')
+
+        first_place = '—'
+        second_place = '—'
+        third_place = None
+
+        if final_matches:
+            final_match = final_matches[0]
+            if final_match['status'] == 'completed':
+                if final_match['player1_wins'] > final_match['player2_wins']:
+                    first_place = final_match['player1_nick'] or '—'
+                    second_place = final_match['player2_nick'] or '—'
+                else:
+                    first_place = final_match['player2_nick'] or '—'
+                    second_place = final_match['player1_nick'] or '—'
+
+        if bronze_matches:
+            bronze_match = bronze_matches[0]
+            if bronze_match['status'] == 'completed':
+                if bronze_match['player1_wins'] > bronze_match['player2_wins']:
+                    third_place = bronze_match['player1_nick'] or '—'
+                else:
+                    third_place = bronze_match['player2_nick'] or '—'
+
+        best_wins_nick = '—'
+        best_wins_value = 0
+        best_avg_nick = '—'
+        best_avg_value = 0.0
+        mvp_nick = '—'
+        mvp_score = -10**9
+
+        for user_id, s in stats.items():
+            player = self.db.get_player(user_id)
+            if not player:
+                continue
+            nick = player.get('ingame_nick') or 'Unknown'
+
+            if s['wins'] > best_wins_value:
+                best_wins_value = s['wins']
+                best_wins_nick = nick
+
+            if s['matches'] > 0:
+                avg_goals = s['goals_scored'] / s['matches']
+                if avg_goals > best_avg_value:
+                    best_avg_value = avg_goals
+                    best_avg_nick = nick
+
+                score = s['wins'] * 3 + (s['goals_scored'] - s['goals_conceded']) + avg_goals
+                if score > mvp_score:
+                    mvp_score = score
+                    mvp_nick = nick
+
+        gains = self.db.get_tournament_rating_gains(tournament_id)
+        top_gains = gains[:3]
+
+        lines = [
+            "━━━━━━━━━━━━━━━━━━━━",
+            "🏆 ТУРНИР ЗАВЕРШЕН",
+            "━━━━━━━━━━━━━━━━━━━━",
+            "",
+            f"📌 Название: {tournament['name']}",
+            f"📅 Дата: {date_str}",
+            f"👥 Участников: {len(joined)}",
+            "",
+            f"🥇 1 место: {first_place}",
+            f"🥈 2 место: {second_place}",
+        ]
+
+        if third_place:
+            lines.append(f"🥉 3 место: {third_place}")
+
+        lines.extend([
+            "",
+            "📊 Лучшие показатели:",
+            f"🔥 MVP турнира: {mvp_nick}",
+            f"⚔️ Больше всего побед: {best_wins_nick} ({best_wins_value})",
+            f"🎯 Лучший средний показатель по голам: {best_avg_nick} - {best_avg_value:.3f}",
+            "",
+            "📈 Топ прирост ELO:",
+        ])
+
+        if top_gains:
+            for row in top_gains:
+                gain = row['gain']
+                sign = '+' if gain >= 0 else ''
+                lines.append(f"{sign}{gain}  {row['ingame_nick']}")
+        else:
+            lines.append("Нет данных")
+
+        lines.extend([
+            "",
+            "👏 Спасибо всем за участие!",
+            "Следующий турнир скоро — следите за анонсом.",
+            "━━━━━━━━━━━━━━━━━━━━",
+        ])
+
+        return "\n".join(lines)
+
     def format_playoff_bracket(self, tournament_id: int) -> str:
-        stages = [('1/8', 8, 3), ('1/4', 4, 3), ('1/2', 2, 4), ('final', 1, 4)]
+        stages = [('1/8', 8, 3), ('1/4', 4, 3), ('1/2', 2, 4), ('bronze', 1, 4), ('final', 1, 4)]
         
         text = "🏆 ПЛЕЙ-ОФФ\n\n"
         text += "<pre>\n"
@@ -1978,6 +2214,9 @@ class TournamentBot:
                 text += f"(до {wins_needed} побед)\n"
             elif stage == '1/2':
                 text += "\n• 1/2 "
+                text += f"(до {wins_needed} побед)\n"
+            elif stage == 'bronze':
+                text += "\n🥉 БРОНЗА "
                 text += f"(до {wins_needed} побед)\n"
             else:
                 text += "\n🏆 ФИНАЛ "
@@ -2008,13 +2247,13 @@ class TournamentBot:
             await update.message.reply_text(
                 "Использование: /pw [стадия] [номер] [ник_победителя] [счёт1] [счёт2]\n"
                 "Пример: /pw 1/8 1 Player1 3 1\n"
-                "Стадии: 1/8, 1/4, 1/2, final"
+                "Стадии: 1/8, 1/4, 1/2, bronze, final"
             )
             return
         
         stage = context.args[0]
-        if stage not in ['1/8', '1/4', '1/2', 'final']:
-            await update.message.reply_text("Неверная стадия. Используйте: 1/8, 1/4, 1/2, final")
+        if stage not in ['1/8', '1/4', '1/2', 'bronze', 'final']:
+            await update.message.reply_text("Неверная стадия. Используйте: 1/8, 1/4, 1/2, bronze, final")
             return
         
         chat_id = update.effective_chat.id
@@ -2055,6 +2294,11 @@ class TournamentBot:
         status = 'completed' if (player1_wins >= wins_needed or player2_wins >= wins_needed) else 'in_progress'
         
         self.db.update_playoff_match(match['id'], player1_wins, player2_wins, status)
+
+        if status == 'completed':
+            winner_nick_resolved = match['player1_nick'] if player1_wins > player2_wins else match['player2_nick']
+            loser_nick_resolved = match['player2_nick'] if player1_wins > player2_wins else match['player1_nick']
+            self.advance_playoff(tournament['id'], stage, match_num, winner_nick_resolved, loser_nick_resolved)
         
         bracket_text = self.format_playoff_bracket(tournament['id'])
         
@@ -2073,7 +2317,12 @@ class TournamentBot:
         result_text = f"✅ Записан результат:\n"
         result_text += f"{match['player1_nick']} {player1_wins}-{player2_wins} {match['player2_nick']}\n"
         if status == 'completed':
-            result_text += f"\n🏆 {winner_nick} проходит в следующий раунд!"
+            if stage == 'final':
+                result_text += f"\n🏆 {winner_nick} — чемпион турнира!"
+            elif stage == 'bronze':
+                result_text += f"\n🥉 {winner_nick} занимает 3 место!"
+            else:
+                result_text += f"\n🏆 {winner_nick} проходит в следующий раунд!"
         
         await update.message.reply_text(result_text)
     
