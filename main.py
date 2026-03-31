@@ -16,7 +16,7 @@ USE_POSTGRES = bool(os.getenv("DATABASE_URL"))
 from dotenv import load_dotenv
 load_dotenv()
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -137,6 +137,18 @@ class Database:
         
         try:
             self.cursor.execute('ALTER TABLE tournaments ADD COLUMN reg_message_id INTEGER')
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            self.cursor.execute('ALTER TABLE tournaments ADD COLUMN groups_graphic_message_id INTEGER')
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            self.cursor.execute('ALTER TABLE tournaments ADD COLUMN playoff_graphic_message_id INTEGER')
             self.conn.commit()
         except sqlite3.OperationalError:
             pass
@@ -333,6 +345,8 @@ class Database:
             'groups_message_id': row[14] if len(row) > 14 else None,
             'results_topic_id': row[15] if len(row) > 15 else None,
             'reg_message_id': row[16] if len(row) > 16 else None,
+            'groups_graphic_message_id': row[17] if len(row) > 17 else None,
+            'playoff_graphic_message_id': row[18] if len(row) > 18 else None,
         }
     
     def update_tournament_status(self, tournament_id: int, status: str):
@@ -390,6 +404,18 @@ class Database:
     def update_tournament_reg_message(self, tournament_id: int, message_id: int):
         self.cursor.execute('''
             UPDATE tournaments SET reg_message_id = ? WHERE id = ?
+        ''', (message_id, tournament_id))
+        self.conn.commit()
+
+    def update_tournament_groups_graphic_message(self, tournament_id: int, message_id: int):
+        self.cursor.execute('''
+            UPDATE tournaments SET groups_graphic_message_id = ? WHERE id = ?
+        ''', (message_id, tournament_id))
+        self.conn.commit()
+
+    def update_tournament_playoff_graphic_message(self, tournament_id: int, message_id: int):
+        self.cursor.execute('''
+            UPDATE tournaments SET playoff_graphic_message_id = ? WHERE id = ?
         ''', (message_id, tournament_id))
         self.conn.commit()
     
@@ -969,6 +995,7 @@ class TournamentBot:
         theme: str = "minimal",
         orientation: str = "vertical",
         message_thread_id: int = None,
+        create_if_missing: bool = True,
     ) -> bool:
         path = None
         try:
@@ -979,13 +1006,30 @@ class TournamentBot:
                 theme=theme,
                 orientation=orientation,
             )
-            with open(path, "rb") as img:
-                await self.application.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=img,
-                    caption=f"📊 Таблица групп ({theme}/{orientation})",
-                    message_thread_id=message_thread_id,
-                )
+            target_message_id = tournament.get("groups_graphic_message_id")
+
+            if target_message_id:
+                with open(path, "rb") as img:
+                    media = InputMediaPhoto(
+                        media=img,
+                        caption=f"📊 Таблица групп ({theme}/{orientation})",
+                    )
+                    await self.application.bot.edit_message_media(
+                        chat_id=chat_id,
+                        message_id=target_message_id,
+                        media=media,
+                    )
+            else:
+                if not create_if_missing:
+                    return False
+                with open(path, "rb") as img:
+                    sent = await self.application.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=img,
+                        caption=f"📊 Таблица групп ({theme}/{orientation})",
+                        message_thread_id=message_thread_id,
+                    )
+                self.db.update_tournament_groups_graphic_message(tournament["id"], sent.message_id)
             return True
         except Exception as e:
             logger.error(f"Error sending groups graphic: {e}")
@@ -1004,6 +1048,7 @@ class TournamentBot:
         theme: str = "minimal",
         orientation: str = "vertical",
         message_thread_id: int = None,
+        create_if_missing: bool = True,
     ) -> bool:
         path = None
         try:
@@ -1014,13 +1059,30 @@ class TournamentBot:
                 theme=theme,
                 orientation=orientation,
             )
-            with open(path, "rb") as img:
-                await self.application.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=img,
-                    caption=f"🏆 Сетка плей-офф ({theme}/{orientation})",
-                    message_thread_id=message_thread_id,
-                )
+            target_message_id = tournament.get("playoff_graphic_message_id")
+
+            if target_message_id:
+                with open(path, "rb") as img:
+                    media = InputMediaPhoto(
+                        media=img,
+                        caption=f"🏆 Сетка плей-офф ({theme}/{orientation})",
+                    )
+                    await self.application.bot.edit_message_media(
+                        chat_id=chat_id,
+                        message_id=target_message_id,
+                        media=media,
+                    )
+            else:
+                if not create_if_missing:
+                    return False
+                with open(path, "rb") as img:
+                    sent = await self.application.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=img,
+                        caption=f"🏆 Сетка плей-офф ({theme}/{orientation})",
+                        message_thread_id=message_thread_id,
+                    )
+                self.db.update_tournament_playoff_graphic_message(tournament["id"], sent.message_id)
             return True
         except Exception as e:
             logger.error(f"Error sending playoff graphic: {e}")
@@ -1496,24 +1558,16 @@ class TournamentBot:
         if tournament:
             await self.notify_admin(tournament['chat_id'], notification)
 
-            if match.get('group_name'):
+            if match.get('group_name') and tournament.get('groups_graphic_message_id'):
                 thread_id = tournament.get('results_topic_id')
-                ok = await self.send_groups_graphic(
+                await self.send_groups_graphic(
                     chat_id=tournament['chat_id'],
                     tournament=tournament,
                     theme='minimal',
                     orientation='vertical',
                     message_thread_id=thread_id,
+                    create_if_missing=False,
                 )
-                if not ok:
-                    try:
-                        await self.application.bot.send_message(
-                            chat_id=tournament['chat_id'],
-                            text=self.generate_groups_table(tournament['id']),
-                            message_thread_id=thread_id,
-                        )
-                    except Exception as e:
-                        logger.error(f"Error sending groups fallback text: {e}")
     
     async def cmd_admin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
@@ -2797,22 +2851,15 @@ class TournamentBot:
             except Exception as e:
                 logger.error(f"Error editing playoff text message: {e}")
 
-        graphic_ok = await self.send_playoff_graphic(
-            chat_id=chat_id,
-            tournament=tournament,
-            theme='minimal',
-            orientation='vertical',
-            message_thread_id=update.message.message_thread_id,
-        )
-        if not graphic_ok:
-            try:
-                await update.message.reply_text(
-                    bracket_text,
-                    parse_mode='HTML',
-                    disable_web_page_preview=True,
-                )
-            except Exception as e:
-                logger.error(f"Error sending playoff fallback text: {e}")
+        if tournament.get('playoff_graphic_message_id'):
+            await self.send_playoff_graphic(
+                chat_id=chat_id,
+                tournament=tournament,
+                theme='minimal',
+                orientation='vertical',
+                message_thread_id=update.message.message_thread_id,
+                create_if_missing=False,
+            )
         
         result_text = f"✅ Записан результат:\n"
         result_text += f"{match['player1_nick']} {player1_wins}-{player2_wins} {match['player2_nick']}\n"

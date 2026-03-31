@@ -84,6 +84,8 @@ class Database:
                 groups_message_id INTEGER,
                 results_topic_id INTEGER,
                 reg_message_id INTEGER,
+                groups_graphic_message_id INTEGER,
+                playoff_graphic_message_id INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -114,6 +116,14 @@ class Database:
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
                                WHERE table_name='tournaments' AND column_name='reg_message_id') THEN
                     ALTER TABLE tournaments ADD COLUMN reg_message_id INTEGER;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                               WHERE table_name='tournaments' AND column_name='groups_graphic_message_id') THEN
+                    ALTER TABLE tournaments ADD COLUMN groups_graphic_message_id INTEGER;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                               WHERE table_name='tournaments' AND column_name='playoff_graphic_message_id') THEN
+                    ALTER TABLE tournaments ADD COLUMN playoff_graphic_message_id INTEGER;
                 END IF;
             END
             $$;
@@ -367,6 +377,18 @@ class Database:
     def update_tournament_reg_message(self, tournament_id: int, message_id: int):
         self.cursor.execute('''
             UPDATE tournaments SET reg_message_id = %s WHERE id = %s
+        ''', (message_id, tournament_id))
+        self.conn.commit()
+
+    def update_tournament_groups_graphic_message(self, tournament_id: int, message_id: int):
+        self.cursor.execute('''
+            UPDATE tournaments SET groups_graphic_message_id = %s WHERE id = %s
+        ''', (message_id, tournament_id))
+        self.conn.commit()
+
+    def update_tournament_playoff_graphic_message(self, tournament_id: int, message_id: int):
+        self.cursor.execute('''
+            UPDATE tournaments SET playoff_graphic_message_id = %s WHERE id = %s
         ''', (message_id, tournament_id))
         self.conn.commit()
     
