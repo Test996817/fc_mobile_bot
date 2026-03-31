@@ -27,6 +27,7 @@ from telegram.ext import (
 )
 
 from ai_service import AIService
+from graphics_renderer import GraphicsRenderer
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -798,6 +799,7 @@ class TournamentBot:
         self.db = Database()
         self.elo = EloCalculator()
         self.ai_service = AIService()
+        self.graphics = GraphicsRenderer()
         self.screenshot_analyzer = ScreenshotAnalyzer()
         self.application = Application.builder().token(token).build()
         self.admin_notifications = {}
@@ -825,6 +827,8 @@ class TournamentBot:
         self.application.add_handler(CommandHandler("finalpost", self.cmd_finalpost))
         self.application.add_handler(CommandHandler("ai", self.cmd_ai))
         self.application.add_handler(CommandHandler("aihealth", self.cmd_aihealth))
+        self.application.add_handler(CommandHandler("gtable", self.cmd_groups_graphic))
+        self.application.add_handler(CommandHandler("pbracket", self.cmd_playoff_graphic))
         
         self.application.add_handler(MessageHandler(
             filters.Regex(r'^!nick\s+(\S.+)'), 
@@ -916,6 +920,117 @@ class TournamentBot:
             text += "\n"
         
         return text.rstrip()
+
+    def parse_visual_options(self, args: List[str]) -> Tuple[str, str, Optional[str]]:
+        theme = "minimal"
+        orientation = "vertical"
+
+        valid_themes = {"minimal", "bright"}
+        valid_orientations = {"vertical", "horizontal"}
+
+        if len(args) >= 1:
+            val = args[0].lower()
+            if val in valid_themes:
+                theme = val
+            elif val in valid_orientations:
+                orientation = val
+            else:
+                return theme, orientation, "Неверная тема/ориентация"
+
+        if len(args) >= 2:
+            val = args[1].lower()
+            if val in valid_orientations:
+                orientation = val
+            elif val in valid_themes and len(args) == 2:
+                theme = val
+            else:
+                return theme, orientation, "Неверная ориентация"
+
+        return theme, orientation, None
+
+    def get_groups_data(self, tournament_id: int) -> Dict[str, List[Dict]]:
+        data = {}
+        for group_key in ["A", "B", "C", "D"]:
+            data[group_key] = self.db.get_group_standings(tournament_id, f"Группа {group_key}")
+        return data
+
+    def get_playoff_stages_data(self, tournament_id: int) -> List[Tuple[str, int, List[Dict]]]:
+        stages = [("1/8", 3), ("1/4", 3), ("1/2", 4), ("bronze", 4), ("final", 4)]
+        output = []
+        for stage, wins_needed in stages:
+            matches = self.db.get_playoff_matches(tournament_id, stage)
+            output.append((stage, wins_needed, matches))
+        return output
+
+    async def send_groups_graphic(
+        self,
+        chat_id: int,
+        tournament: Dict,
+        theme: str = "minimal",
+        orientation: str = "vertical",
+        message_thread_id: int = None,
+    ) -> bool:
+        path = None
+        try:
+            groups_data = self.get_groups_data(tournament["id"])
+            path = self.graphics.render_groups_table_image(
+                tournament_name=tournament["name"],
+                groups_data=groups_data,
+                theme=theme,
+                orientation=orientation,
+            )
+            with open(path, "rb") as img:
+                await self.application.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=img,
+                    caption=f"📊 Таблица групп ({theme}/{orientation})",
+                    message_thread_id=message_thread_id,
+                )
+            return True
+        except Exception as e:
+            logger.error(f"Error sending groups graphic: {e}")
+            return False
+        finally:
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+
+    async def send_playoff_graphic(
+        self,
+        chat_id: int,
+        tournament: Dict,
+        theme: str = "minimal",
+        orientation: str = "vertical",
+        message_thread_id: int = None,
+    ) -> bool:
+        path = None
+        try:
+            stages_data = self.get_playoff_stages_data(tournament["id"])
+            path = self.graphics.render_playoff_bracket_image(
+                tournament_name=tournament["name"],
+                stages_data=stages_data,
+                theme=theme,
+                orientation=orientation,
+            )
+            with open(path, "rb") as img:
+                await self.application.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=img,
+                    caption=f"🏆 Сетка плей-офф ({theme}/{orientation})",
+                    message_thread_id=message_thread_id,
+                )
+            return True
+        except Exception as e:
+            logger.error(f"Error sending playoff graphic: {e}")
+            return False
+        finally:
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
     
     async def send_groups_table(self, chat_id: int, tournament_id: int) -> Tuple[int, int]:
         text = self.generate_groups_table(tournament_id)
@@ -1380,6 +1495,25 @@ class TournamentBot:
         tournament = self.db.get_tournament(match['tournament_id'])
         if tournament:
             await self.notify_admin(tournament['chat_id'], notification)
+
+            if match.get('group_name'):
+                thread_id = tournament.get('results_topic_id')
+                ok = await self.send_groups_graphic(
+                    chat_id=tournament['chat_id'],
+                    tournament=tournament,
+                    theme='minimal',
+                    orientation='vertical',
+                    message_thread_id=thread_id,
+                )
+                if not ok:
+                    try:
+                        await self.application.bot.send_message(
+                            chat_id=tournament['chat_id'],
+                            text=self.generate_groups_table(tournament['id']),
+                            message_thread_id=thread_id,
+                        )
+                    except Exception as e:
+                        logger.error(f"Error sending groups fallback text: {e}")
     
     async def cmd_admin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
@@ -1402,7 +1536,9 @@ class TournamentBot:
             "/finalpost [ID] - отправить финальный пост\n"
             "/dbstats - статистика базы\n"
             "/ai [вопрос] - AI ассистент админа\n"
-            "/aihealth - диагностика AI"
+            "/aihealth - диагностика AI\n"
+            "/gtable [theme] [orientation] - графическая таблица групп\n"
+            "/pbracket [theme] [orientation] - графическая сетка плей-офф"
         )
         await update.message.reply_text(text)
     
@@ -1853,6 +1989,72 @@ class TournamentBot:
         )
         await update.message.reply_text(text)
 
+    async def cmd_groups_graphic(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        tournament = self.db.get_tournament_by_chat(update.effective_chat.id)
+        if not tournament:
+            await update.message.reply_text("Нет активного турнира в этом чате.")
+            return
+
+        theme, orientation, err = self.parse_visual_options(context.args)
+        if err:
+            await update.message.reply_text(
+                "❌ Неверные параметры. Используйте: /gtable [minimal|bright] [vertical|horizontal]"
+            )
+            return
+
+        ok = await self.send_groups_graphic(
+            chat_id=update.effective_chat.id,
+            tournament=tournament,
+            theme=theme,
+            orientation=orientation,
+            message_thread_id=update.message.message_thread_id,
+        )
+
+        if not ok:
+            await update.message.reply_text(
+                "⚠️ Не удалось сгенерировать графику, отправляю текстовую таблицу."
+            )
+            await update.message.reply_text(self.generate_groups_table(tournament["id"]))
+
+    async def cmd_playoff_graphic(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        tournament = self.db.get_tournament_by_chat(update.effective_chat.id)
+        if not tournament:
+            await update.message.reply_text("Нет активного турнира в этом чате.")
+            return
+
+        theme, orientation, err = self.parse_visual_options(context.args)
+        if err:
+            await update.message.reply_text(
+                "❌ Неверные параметры. Используйте: /pbracket [minimal|bright] [vertical|horizontal]"
+            )
+            return
+
+        ok = await self.send_playoff_graphic(
+            chat_id=update.effective_chat.id,
+            tournament=tournament,
+            theme=theme,
+            orientation=orientation,
+            message_thread_id=update.message.message_thread_id,
+        )
+
+        if not ok:
+            await update.message.reply_text(
+                "⚠️ Не удалось сгенерировать графику, отправляю текстовую сетку."
+            )
+            await update.message.reply_text(
+                self.format_playoff_bracket(tournament["id"]),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+
     def build_ai_tournament_context(self, tournament: Dict) -> str:
         matches = self.db.get_tournament_matches(tournament['id'])
         pending = len([m for m in matches if m['status'] == 'pending'])
@@ -1967,7 +2169,10 @@ class TournamentBot:
                 500
             )
             self.ai_cooldowns[chat_id] = now
-            await update.message.reply_text(answer[:3800])
+            provider_used = self.ai_service.last_provider_used
+            model_used = self.ai_service.last_model_used
+            answer_with_meta = f"{answer}\n\nℹ️ Источник AI: {provider_used} ({model_used})"
+            await update.message.reply_text(answer_with_meta[:3800])
         except Exception as e:
             logger.error(f"AI command error: {e}")
             fallback_text = self.build_ai_fallback_response(tournament, user_question)
@@ -1994,7 +2199,9 @@ class TournamentBot:
             f"groq model: {self.ai_service.groq_model}\n"
             f"openrouter key set: {openrouter_set}\n"
             f"openrouter model: {self.ai_service.openrouter_model}\n"
-            f"timeout: {self.ai_service.timeout_sec}s"
+            f"timeout: {self.ai_service.timeout_sec}s\n"
+            f"last provider used: {self.ai_service.last_provider_used}\n"
+            f"last model used: {self.ai_service.last_model_used}"
         )
         await update.message.reply_text(text)
 
@@ -2008,7 +2215,12 @@ class TournamentBot:
                 "Проверка связи",
                 20,
             )
-            await update.message.reply_text(f"✅ AI test passed: {answer[:200]}")
+            provider_used = self.ai_service.last_provider_used
+            model_used = self.ai_service.last_model_used
+            await update.message.reply_text(
+                f"✅ AI test passed: {answer[:200]}\n"
+                f"Источник: {provider_used} ({model_used})"
+            )
         except Exception as e:
             logger.error(f"AI health check error: {e}")
             await update.message.reply_text(f"❌ AI test failed: {str(e)[:900]}")
@@ -2295,6 +2507,14 @@ class TournamentBot:
         )
         self.db.conn.commit()
 
+        await self.send_playoff_graphic(
+            chat_id=chat_id,
+            tournament=tournament,
+            theme='minimal',
+            orientation='vertical',
+            message_thread_id=update.message.message_thread_id,
+        )
+
     def set_playoff_match_slot(self, tournament_id: int, stage: str, match_num: int, slot: int, nick: str):
         matches = self.db.get_playoff_matches(tournament_id, stage)
         existing = next((m for m in matches if m['match_num'] == match_num), None)
@@ -2574,8 +2794,25 @@ class TournamentBot:
                     parse_mode='HTML',
                     disable_web_page_preview=True
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Error editing playoff text message: {e}")
+
+        graphic_ok = await self.send_playoff_graphic(
+            chat_id=chat_id,
+            tournament=tournament,
+            theme='minimal',
+            orientation='vertical',
+            message_thread_id=update.message.message_thread_id,
+        )
+        if not graphic_ok:
+            try:
+                await update.message.reply_text(
+                    bracket_text,
+                    parse_mode='HTML',
+                    disable_web_page_preview=True,
+                )
+            except Exception as e:
+                logger.error(f"Error sending playoff fallback text: {e}")
         
         result_text = f"✅ Записан результат:\n"
         result_text += f"{match['player1_nick']} {player1_wins}-{player2_wins} {match['player2_nick']}\n"

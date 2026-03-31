@@ -32,6 +32,8 @@ class AIService:
             "OPENROUTER_BASE_URL",
             "https://openrouter.ai/api/v1/chat/completions",
         )
+        self.last_provider_used = "-"
+        self.last_model_used = "-"
 
     def is_available(self) -> Tuple[bool, str]:
         if not self.enabled:
@@ -55,6 +57,8 @@ class AIService:
         return False, "AI_PROVIDER должен быть: groq, openrouter или auto"
 
     def ask(self, system_prompt: str, user_prompt: str, max_tokens: int = 500) -> str:
+        self.last_provider_used = "-"
+        self.last_model_used = "-"
         available, reason = self.is_available()
         if not available:
             raise RuntimeError(reason)
@@ -211,6 +215,8 @@ class AIService:
             content = response_data["choices"][0]["message"]["content"].strip()
             if not content:
                 raise ValueError("empty content")
+            self.last_provider_used = provider
+            self.last_model_used = model
             return content
         except Exception:
             raise AIProviderError(provider, "format", "Unexpected provider response format")
