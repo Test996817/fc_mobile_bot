@@ -5,6 +5,7 @@ import json
 import os
 import re
 import random
+import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
@@ -24,6 +25,8 @@ from telegram.ext import (
     filters,
     ContextTypes
 )
+
+from ai_service import AIService
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -794,10 +797,12 @@ class TournamentBot:
         self.token = token
         self.db = Database()
         self.elo = EloCalculator()
+        self.ai_service = AIService()
         self.screenshot_analyzer = ScreenshotAnalyzer()
         self.application = Application.builder().token(token).build()
         self.admin_notifications = {}
         self.cooldowns = {}
+        self.ai_cooldowns = {}
         self.setup_handlers()
     
     def setup_handlers(self):
@@ -818,6 +823,7 @@ class TournamentBot:
         self.application.add_handler(CommandHandler("tinfo", self.cmd_tinfo))
         self.application.add_handler(CommandHandler("dbstats", self.cmd_dbstats))
         self.application.add_handler(CommandHandler("finalpost", self.cmd_finalpost))
+        self.application.add_handler(CommandHandler("ai", self.cmd_ai))
         
         self.application.add_handler(MessageHandler(
             filters.Regex(r'^!nick\s+(\S.+)'), 
@@ -1393,7 +1399,8 @@ class TournamentBot:
             "/allmatches - все матчи\n"
             "/tinfo [ID] - информация по турниру\n"
             "/finalpost [ID] - отправить финальный пост\n"
-            "/dbstats - статистика базы"
+            "/dbstats - статистика базы\n"
+            "/ai [вопрос] - AI ассистент админа"
         )
         await update.message.reply_text(text)
     
@@ -1843,6 +1850,91 @@ class TournamentBot:
             f"rating_snapshots: {counts['tournament_rating_snapshots']}"
         )
         await update.message.reply_text(text)
+
+    def build_ai_tournament_context(self, tournament: Dict) -> str:
+        matches = self.db.get_tournament_matches(tournament['id'])
+        pending = len([m for m in matches if m['status'] == 'pending'])
+        in_progress = len([m for m in matches if m['status'] == 'in_progress'])
+        completed = len([m for m in matches if m['status'] == 'completed'])
+        joined = [p for p in tournament['players'] if p['tournament_status'] == 'joined']
+
+        playoff_matches = self.db.get_playoff_matches(tournament['id'])
+        playoff_completed = len([m for m in playoff_matches if m.get('status') == 'completed'])
+
+        gains = self.db.get_tournament_rating_gains(tournament['id'])
+        top_gains = gains[:5]
+        gains_text = "\n".join(
+            [f"- {row['ingame_nick']}: {row['gain']:+d}" for row in top_gains]
+        ) if top_gains else "- нет данных"
+
+        return (
+            f"Турнир #{tournament['id']}\n"
+            f"Название: {tournament['name']}\n"
+            f"Формат: {tournament['format']}\n"
+            f"Статус: {tournament['status']}\n"
+            f"Раунд: {tournament.get('current_round', 0)}\n"
+            f"Участников: {len(joined)}\n"
+            f"Матчи pending: {pending}\n"
+            f"Матчи in_progress: {in_progress}\n"
+            f"Матчи completed: {completed}\n"
+            f"Плей-офф завершено: {playoff_completed}/{len(playoff_matches)}\n"
+            f"Топ прирост ELO:\n{gains_text}"
+        )
+
+    async def cmd_ai(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        if not context.args:
+            await update.message.reply_text("Использование: /ai [вопрос]")
+            return
+
+        chat_id = update.effective_chat.id
+        now = datetime.now().timestamp()
+        last_used = self.ai_cooldowns.get(chat_id, 0)
+        if now - last_used < 10:
+            await update.message.reply_text("⏳ Подожди несколько секунд перед следующим AI-запросом.")
+            return
+
+        available, reason = self.ai_service.is_available()
+        if not available:
+            await update.message.reply_text(f"❌ AI недоступен: {reason}")
+            return
+
+        tournament = self.db.get_tournament_by_chat(chat_id)
+        if not tournament:
+            await update.message.reply_text("Нет активного турнира в этом чате.")
+            return
+
+        user_question = " ".join(context.args).strip()
+        if len(user_question) > 600:
+            user_question = user_question[:600]
+
+        tournament_context = self.build_ai_tournament_context(tournament)
+        system_prompt = (
+            "Ты ассистент администратора турниров FC Mobile. "
+            "Отвечай только на русском, кратко и по делу. "
+            "Дай конкретные шаги/рекомендации, если уместно."
+        )
+        user_prompt = (
+            f"Контекст турнира:\n{tournament_context}\n\n"
+            f"Вопрос администратора: {user_question}"
+        )
+
+        try:
+            await update.message.reply_text("🤖 Анализирую...")
+            answer = await asyncio.to_thread(
+                self.ai_service.ask,
+                system_prompt,
+                user_prompt,
+                500
+            )
+            self.ai_cooldowns[chat_id] = now
+            await update.message.reply_text(answer[:3800])
+        except Exception as e:
+            logger.error(f"AI command error: {e}")
+            await update.message.reply_text("❌ ИИ временно недоступен, попробуйте позже.")
 
     async def cmd_matches(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
