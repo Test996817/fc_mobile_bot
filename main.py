@@ -1881,6 +1881,40 @@ class TournamentBot:
             f"Топ прирост ELO:\n{gains_text}"
         )
 
+    def build_ai_fallback_response(self, tournament: Dict, question: str) -> str:
+        matches = self.db.get_tournament_matches(tournament['id'])
+        pending = len([m for m in matches if m['status'] == 'pending'])
+        in_progress = len([m for m in matches if m['status'] == 'in_progress'])
+        completed = len([m for m in matches if m['status'] == 'completed'])
+        joined = [p for p in tournament['players'] if p['tournament_status'] == 'joined']
+
+        playoff_matches = self.db.get_playoff_matches(tournament['id'])
+        playoff_completed = len([m for m in playoff_matches if m.get('status') == 'completed'])
+
+        lines = [
+            "⚠️ ИИ временно недоступен, даю локальную сводку:",
+            "",
+            f"📌 Турнир #{tournament['id']} - {tournament['name']}",
+            f"Статус: {tournament['status']} | Формат: {tournament['format']}",
+            f"Участников: {len(joined)}/{tournament.get('max_players') or '∞'}",
+            f"Матчи: pending {pending}, in_progress {in_progress}, completed {completed}",
+            f"Плей-офф: {playoff_completed}/{len(playoff_matches)} завершено",
+        ]
+
+        if pending > 0:
+            lines.extend([
+                "",
+                "Рекомендации:",
+                "1) Дайте напоминание игрокам с pending-матчами (/notifyall).",
+                "2) Проверьте корректность топика результатов (RESULTS_TOPIC).",
+                "3) Для нераспознанных скринов используйте /gresult.",
+            ])
+
+        if question:
+            lines.extend(["", f"Ваш вопрос: {question}"])
+
+        return "\n".join(lines)
+
     async def cmd_ai(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
             await update.message.reply_text("❌ Команда доступна только админам.")
@@ -1934,7 +1968,8 @@ class TournamentBot:
             await update.message.reply_text(answer[:3800])
         except Exception as e:
             logger.error(f"AI command error: {e}")
-            await update.message.reply_text("❌ ИИ временно недоступен, попробуйте позже.")
+            fallback_text = self.build_ai_fallback_response(tournament, user_question)
+            await update.message.reply_text(fallback_text[:3800])
 
     async def cmd_matches(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
