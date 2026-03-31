@@ -797,8 +797,6 @@ class TournamentBot:
         self.screenshot_analyzer = ScreenshotAnalyzer()
         self.application = Application.builder().token(token).build()
         self.admin_notifications = {}
-        self.join_message_id = None
-        self.join_chat_id = None
         self.cooldowns = {}
         self.setup_handlers()
     
@@ -845,9 +843,9 @@ class TournamentBot:
         self.application.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
     
-    def notify_admin(self, chat_id: int, message: str):
+    async def notify_admin(self, chat_id: int, message: str):
         try:
-            self.application.bot.send_message(chat_id=chat_id, text=message)
+            await self.application.bot.send_message(chat_id=chat_id, text=message)
         except Exception as e:
             logger.error(f"Failed to send admin notification: {e}")
     
@@ -1039,24 +1037,6 @@ class TournamentBot:
             f"Забито: {player['goals_scored']}\n"
             f"Пропущено: {player['goals_conceded']}"
         )
-        await update.message.reply_text(text)
-    
-    async def cmd_rating(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        top = self.db.get_top_players(20)
-        
-        if not top:
-            await update.message.reply_text("Пока нет игроков в рейтинге.")
-            return
-        
-        text = "🏆 ТАБЛИЦА ЛИДЕРОВ\n\n"
-        medals = ["🥇", "🥈", "🥉"]
-        
-        for i, p in enumerate(top[:15], 1):
-            medal = medals[i-1] if i <= 3 else f"{i}."
-            name = p['ingame_nick'] or p['username'] or "?"
-            text += f"{medal} {name}\n"
-            text += f"   ELO: {p['rating']} | В:{p['wins']} П:{p['losses']} Н:{p['draws']}\n"
-        
         await update.message.reply_text(text)
     
     async def cmd_my_matches(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1392,7 +1372,7 @@ class TournamentBot:
         
         tournament = self.db.get_tournament(match['tournament_id'])
         if tournament:
-            self.notify_admin(tournament['chat_id'], notification)
+            await self.notify_admin(tournament['chat_id'], notification)
     
     async def cmd_admin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
@@ -1905,27 +1885,6 @@ class TournamentBot:
                 text += f"  #{m['id']} {p1['ingame_nick']} {m['player1_score']}:{m['player2_score']} {p2['ingame_nick']}\n"
         
         await update.message.reply_text(text)
-    
-    def create_playoffs_from_groups(self, tournament: Dict):
-        groups = {}
-        for player in tournament['players']:
-            if player['tournament_status'] == 'approved' and player['group_name']:
-                if player['group_name'] not in groups:
-                    groups[player['group_name']] = []
-                groups[player['group_name']].append(player)
-        
-        for group_name, group_players in groups.items():
-            standings = self.db.get_group_standings(tournament['id'], group_name)
-            
-            if len(standings) >= 2:
-                self.db.create_match(
-                    tournament['id'],
-                    standings[0]['user_id'],
-                    standings[1]['user_id'],
-                    round_num=2,
-                    match_type='quarterfinal',
-                    deadline_days=tournament['deadline_days']
-                )
     
     def create_next_knockout_round(self, tournament: Dict, current_round: int):
         matches = self.db.get_tournament_matches(tournament['id'], 'completed')
