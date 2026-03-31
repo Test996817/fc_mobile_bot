@@ -824,6 +824,7 @@ class TournamentBot:
         self.application.add_handler(CommandHandler("dbstats", self.cmd_dbstats))
         self.application.add_handler(CommandHandler("finalpost", self.cmd_finalpost))
         self.application.add_handler(CommandHandler("ai", self.cmd_ai))
+        self.application.add_handler(CommandHandler("aihealth", self.cmd_aihealth))
         
         self.application.add_handler(MessageHandler(
             filters.Regex(r'^!nick\s+(\S.+)'), 
@@ -1400,7 +1401,8 @@ class TournamentBot:
             "/tinfo [ID] - информация по турниру\n"
             "/finalpost [ID] - отправить финальный пост\n"
             "/dbstats - статистика базы\n"
-            "/ai [вопрос] - AI ассистент админа"
+            "/ai [вопрос] - AI ассистент админа\n"
+            "/aihealth - диагностика AI"
         )
         await update.message.reply_text(text)
     
@@ -1969,7 +1971,47 @@ class TournamentBot:
         except Exception as e:
             logger.error(f"AI command error: {e}")
             fallback_text = self.build_ai_fallback_response(tournament, user_question)
-            await update.message.reply_text(fallback_text[:3800])
+            await update.message.reply_text(fallback_text[:3200])
+            await update.message.reply_text(f"🔎 Диагностика AI: {str(e)[:700]}")
+
+    async def cmd_aihealth(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        available, reason = self.ai_service.is_available()
+        provider = self.ai_service.provider
+        groq_set = "yes" if bool(self.ai_service.groq_key) else "no"
+        openrouter_set = "yes" if bool(self.ai_service.openrouter_key) else "no"
+
+        text = (
+            "🩺 AI HEALTH\n\n"
+            f"enabled: {self.ai_service.enabled}\n"
+            f"provider mode: {provider}\n"
+            f"available: {available}\n"
+            f"reason: {reason}\n"
+            f"groq key set: {groq_set}\n"
+            f"groq model: {self.ai_service.groq_model}\n"
+            f"openrouter key set: {openrouter_set}\n"
+            f"openrouter model: {self.ai_service.openrouter_model}\n"
+            f"timeout: {self.ai_service.timeout_sec}s"
+        )
+        await update.message.reply_text(text)
+
+        if not available:
+            return
+
+        try:
+            answer = await asyncio.to_thread(
+                self.ai_service.ask,
+                "Ответь одним словом OK.",
+                "Проверка связи",
+                20,
+            )
+            await update.message.reply_text(f"✅ AI test passed: {answer[:200]}")
+        except Exception as e:
+            logger.error(f"AI health check error: {e}")
+            await update.message.reply_text(f"❌ AI test failed: {str(e)[:900]}")
 
     async def cmd_matches(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
