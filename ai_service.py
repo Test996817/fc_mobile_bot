@@ -26,7 +26,7 @@ class AIService:
         self.openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
         self.openrouter_model = os.getenv(
             "OPENROUTER_MODEL",
-            "meta-llama/llama-3.1-8b-instruct:free",
+            "openrouter/auto",
         )
         self.openrouter_url = os.getenv(
             "OPENROUTER_BASE_URL",
@@ -114,19 +114,36 @@ class AIService:
         if not self.openrouter_key:
             raise AIProviderError("openrouter", "config", "OPENROUTER_API_KEY is missing")
 
-        return self._post_chat(
-            provider="openrouter",
-            url=self.openrouter_url,
-            api_key=self.openrouter_key,
-            model=self.openrouter_model,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            max_tokens=max_tokens,
-            extra_headers={
-                "HTTP-Referer": "https://railway.app",
-                "X-Title": "fc-mobile-bot",
-            },
-        )
+        try:
+            return self._post_chat(
+                provider="openrouter",
+                url=self.openrouter_url,
+                api_key=self.openrouter_key,
+                model=self.openrouter_model,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=max_tokens,
+                extra_headers={
+                    "HTTP-Referer": "https://railway.app",
+                    "X-Title": "fc-mobile-bot",
+                },
+            )
+        except AIProviderError as e:
+            if "No endpoints found" in e.message and self.openrouter_model != "openrouter/auto":
+                return self._post_chat(
+                    provider="openrouter",
+                    url=self.openrouter_url,
+                    api_key=self.openrouter_key,
+                    model="openrouter/auto",
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    max_tokens=max_tokens,
+                    extra_headers={
+                        "HTTP-Referer": "https://railway.app",
+                        "X-Title": "fc-mobile-bot",
+                    },
+                )
+            raise
 
     def _post_chat(
         self,
