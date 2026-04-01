@@ -8,6 +8,7 @@ import random
 import asyncio
 import html
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
@@ -221,6 +222,38 @@ class Database:
                 PRIMARY KEY (tournament_id, user_id)
             )
         ''')
+
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS league_debt_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                round_label TEXT,
+                debtor_username TEXT NOT NULL,
+                opponent_username TEXT,
+                raw_line TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS league_reminder_settings (
+                chat_id INTEGER PRIMARY KEY,
+                enabled INTEGER DEFAULT 0,
+                timezone TEXT DEFAULT 'Europe/Moscow',
+                threshold INTEGER DEFAULT 2,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS league_reminder_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                slot_key TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(chat_id, slot_key)
+            )
+        ''')
         
         self.conn.commit()
     
@@ -384,6 +417,114 @@ class Database:
     def get_all_players(self) -> List[Dict]:
         self.cursor.execute('SELECT * FROM players WHERE ingame_nick IS NOT NULL ORDER BY rating DESC')
         return [self._row_to_player(row) for row in self.cursor.fetchall()]
+
+    def replace_league_debts(self, chat_id: int, entries: List[Dict]):
+        self.cursor.execute('DELETE FROM league_debt_entries WHERE chat_id = ?', (chat_id,))
+
+        for entry in entries:
+            self.cursor.execute('''
+                INSERT INTO league_debt_entries (
+                    chat_id, round_label, debtor_username, opponent_username, raw_line
+                ) VALUES (?, ?, ?, ?, ?)
+            ''', (
+                chat_id,
+                entry.get('round_label'),
+                entry.get('debtor_username'),
+                entry.get('opponent_username'),
+                entry.get('raw_line'),
+            ))
+
+        self.conn.commit()
+
+    def clear_league_debts(self, chat_id: int):
+        self.cursor.execute('DELETE FROM league_debt_entries WHERE chat_id = ?', (chat_id,))
+        self.conn.commit()
+
+    def get_league_debt_summary(self, chat_id: int) -> List[Dict]:
+        self.cursor.execute('''
+            SELECT debtor_username, COUNT(*) AS debts_count
+            FROM league_debt_entries
+            WHERE chat_id = ?
+            GROUP BY debtor_username
+            ORDER BY debts_count DESC, debtor_username ASC
+        ''', (chat_id,))
+
+        rows = self.cursor.fetchall()
+        return [
+            {
+                'debtor_username': row[0],
+                'debts_count': row[1],
+            }
+            for row in rows
+        ]
+
+    def get_league_debts_count(self, chat_id: int) -> int:
+        self.cursor.execute(
+            'SELECT COUNT(*) FROM league_debt_entries WHERE chat_id = ?',
+            (chat_id,)
+        )
+        row = self.cursor.fetchone()
+        return row[0] if row else 0
+
+    def set_league_reminder_enabled(self, chat_id: int, enabled: bool):
+        enabled_int = 1 if enabled else 0
+        self.cursor.execute('''
+            INSERT INTO league_reminder_settings (chat_id, enabled, timezone, threshold, updated_at)
+            VALUES (?, ?, 'Europe/Moscow', 2, CURRENT_TIMESTAMP)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                enabled = excluded.enabled,
+                updated_at = CURRENT_TIMESTAMP
+        ''', (chat_id, enabled_int))
+        self.conn.commit()
+
+    def get_league_reminder_settings(self, chat_id: int) -> Dict:
+        self.cursor.execute('''
+            SELECT chat_id, enabled, timezone, threshold
+            FROM league_reminder_settings
+            WHERE chat_id = ?
+        ''', (chat_id,))
+        row = self.cursor.fetchone()
+
+        if not row:
+            return {
+                'chat_id': chat_id,
+                'enabled': 0,
+                'timezone': 'Europe/Moscow',
+                'threshold': 2,
+            }
+
+        return {
+            'chat_id': row[0],
+            'enabled': row[1],
+            'timezone': row[2],
+            'threshold': row[3],
+        }
+
+    def get_enabled_league_reminder_chats(self) -> List[Dict]:
+        self.cursor.execute('''
+            SELECT chat_id, enabled, timezone, threshold
+            FROM league_reminder_settings
+            WHERE enabled = 1
+        ''')
+
+        rows = self.cursor.fetchall()
+        return [
+            {
+                'chat_id': row[0],
+                'enabled': row[1],
+                'timezone': row[2],
+                'threshold': row[3],
+            }
+            for row in rows
+        ]
+
+    def try_mark_league_reminder_run(self, chat_id: int, slot_key: str) -> bool:
+        self.cursor.execute('''
+            INSERT OR IGNORE INTO league_reminder_runs (chat_id, slot_key)
+            VALUES (?, ?)
+        ''', (chat_id, slot_key))
+        self.conn.commit()
+        return self.cursor.rowcount > 0
     
     def delete_tournament_matches(self, tournament_id: int):
         self.cursor.execute('DELETE FROM matches WHERE tournament_id = ?', (tournament_id,))
@@ -832,7 +973,10 @@ class TournamentBot:
         self.admin_notifications = {}
         self.cooldowns = {}
         self.ai_cooldowns = {}
+        self.league_reminder_times = {"09:00", "15:00", "20:00"}
+        self.moscow_tz = ZoneInfo("Europe/Moscow")
         self.setup_handlers()
+        self.setup_jobs()
     
     def setup_handlers(self):
         self.application.add_handler(CommandHandler("admin", self.cmd_admin))
@@ -856,6 +1000,12 @@ class TournamentBot:
         self.application.add_handler(CommandHandler("aihealth", self.cmd_aihealth))
         self.application.add_handler(CommandHandler("gtable", self.cmd_groups_graphic))
         self.application.add_handler(CommandHandler("pbracket", self.cmd_playoff_graphic))
+        self.application.add_handler(CommandHandler("league_debts", self.cmd_league_debts))
+        self.application.add_handler(CommandHandler("league_debts_show", self.cmd_league_debts_show))
+        self.application.add_handler(CommandHandler("league_debts_clear", self.cmd_league_debts_clear))
+        self.application.add_handler(CommandHandler("league_reminder_on", self.cmd_league_reminder_on))
+        self.application.add_handler(CommandHandler("league_reminder_off", self.cmd_league_reminder_off))
+        self.application.add_handler(CommandHandler("league_reminder_now", self.cmd_league_reminder_now))
         
         self.application.add_handler(MessageHandler(
             filters.Regex(r'^!nick\s+(\S.+)'), 
@@ -880,6 +1030,18 @@ class TournamentBot:
         
         self.application.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
+
+    def setup_jobs(self):
+        if not self.application.job_queue:
+            logger.warning("JobQueue is unavailable. League reminders are disabled.")
+            return
+
+        self.application.job_queue.run_repeating(
+            self.league_reminder_scheduler,
+            interval=60,
+            first=10,
+            name="league_reminder_scheduler",
+        )
     
     async def notify_admin(self, chat_id: int, message: str):
         try:
@@ -1577,25 +1739,224 @@ class TournamentBot:
         
         text = (
             "👑 ПАНЕЛЬ АДМИНИСТРАТОРА\n\n"
+            "⚙️ Команды для запуска турнира:\n"
             "/tournament_create Название - создать турнир\n"
+            "/refreshreg - обновить пост регистрации\n"
             "/tournament_start - начать турнир\n"
-            "/tournament_end - завершить турнир\n"
-            "/elo - таблица рейтинга\n"
+            "/tournament_end - завершить турнир\n\n"
+            "🎮 Команды управления матчами:\n"
+            "/allmatches - все матчи\n"
+            "/gresult Player1 13-10 Player2 - вручную результат\n"
             "/tp [ник] - тех. поражение\n"
             "/replace [old] [new] - замена\n"
             "/cancelmatch [ник1] [ник2] - отмена\n"
+            "/notifyall - пинг по регистрации\n\n"
+            "🏆 Плей-офф и визуал:\n"
             "/playoff - генерация плей-офф\n"
             "/pw [стадия] [№] [ник] [счёт] - результат\n"
-            "/allmatches - все матчи\n"
+            "/gtable [theme] [orientation] - графическая таблица групп\n"
+            "/pbracket [theme] [orientation] - графическая сетка плей-офф\n\n"
+            "📌 Лига (долги):\n"
+            "/league_debts [текст] - загрузить список долгов\n"
+            "/league_debts_show - сводка по долгам\n"
+            "/league_debts_clear - очистить долги\n"
+            "/league_reminder_on - включить авто-напоминания\n"
+            "/league_reminder_off - выключить авто-напоминания\n"
+            "/league_reminder_now - отправить напоминание сейчас\n\n"
+            "📊 Аналитика и сервис:\n"
+            "/elo - таблица рейтинга\n"
             "/tinfo [ID] - информация по турниру\n"
             "/finalpost [ID] - отправить финальный пост\n"
             "/dbstats - статистика базы\n"
             "/ai [вопрос] - AI ассистент админа\n"
-            "/aihealth - диагностика AI\n"
-            "/gtable [theme] [orientation] - графическая таблица групп\n"
-            "/pbracket [theme] [orientation] - графическая сетка плей-офф"
+            "/aihealth - диагностика AI"
         )
         await update.message.reply_text(text)
+
+    def parse_league_debts_text(self, raw_text: str) -> List[Dict]:
+        entries = []
+        current_round = None
+
+        for line in raw_text.splitlines():
+            cleaned = line.strip()
+            if not cleaned:
+                continue
+
+            round_match = re.match(r'^(\d+)\s*тур\s*:\s*$', cleaned, flags=re.IGNORECASE)
+            if round_match:
+                current_round = f"{round_match.group(1)} тур"
+                continue
+
+            debt_match = re.search(r'@([A-Za-z0-9_]+).*?[—\-]\s*@([A-Za-z0-9_]+)', cleaned)
+            if not debt_match:
+                continue
+
+            entries.append({
+                'round_label': current_round,
+                'debtor_username': debt_match.group(1),
+                'opponent_username': debt_match.group(2),
+                'raw_line': cleaned,
+            })
+
+        return entries
+
+    def build_league_summary_text(self, chat_id: int, threshold: int = 2) -> str:
+        summary = self.db.get_league_debt_summary(chat_id)
+        total = self.db.get_league_debts_count(chat_id)
+
+        if not summary:
+            return "Долги лиги не загружены."
+
+        lines = [f"📋 Долги лиги (всего матчей-долгов: {total})", ""]
+
+        for row in summary:
+            marker = " ⚠️" if row['debts_count'] > threshold else ""
+            lines.append(f"@{row['debtor_username']} — {row['debts_count']}{marker}")
+
+        lines.append("")
+        lines.append(f"Порог для напоминания: > {threshold}")
+        return "\n".join(lines)
+
+    async def send_league_reminder_message(self, chat_id: int, threshold: int = 2, bot=None) -> bool:
+        summary = self.db.get_league_debt_summary(chat_id)
+        debtors = [row for row in summary if row['debts_count'] > threshold]
+
+        if not debtors:
+            return False
+
+        mentions = " ".join([f"@{row['debtor_username']}" for row in debtors])
+        lines = [
+            "🔔 Напоминание по долгам в лиге",
+            f"{mentions}",
+            "",
+            "У вас больше 2 долгов. Пожалуйста, сыграйте долги сегодня.",
+            "",
+            "Текущие долги:",
+        ]
+
+        for row in debtors:
+            lines.append(f"- @{row['debtor_username']}: {row['debts_count']}")
+
+        target_bot = bot or self.application.bot
+        try:
+            await target_bot.send_message(chat_id=chat_id, text="\n".join(lines))
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send league reminder to chat {chat_id}: {e}")
+            return False
+
+    async def league_reminder_scheduler(self, context: ContextTypes.DEFAULT_TYPE):
+        now_msk = datetime.now(self.moscow_tz)
+        time_key = now_msk.strftime("%H:%M")
+
+        if time_key not in self.league_reminder_times:
+            return
+
+        slot_key = now_msk.strftime("%Y-%m-%d %H:%M")
+        chats = self.db.get_enabled_league_reminder_chats()
+
+        for cfg in chats:
+            chat_id = cfg['chat_id']
+            threshold = cfg.get('threshold', 2)
+
+            if not self.db.try_mark_league_reminder_run(chat_id, slot_key):
+                continue
+
+            await self.send_league_reminder_message(
+                chat_id=chat_id,
+                threshold=threshold,
+                bot=context.bot,
+            )
+
+    async def cmd_league_debts(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        payload = ""
+        if update.message and update.message.text:
+            parts = update.message.text.split(maxsplit=1)
+            if len(parts) > 1:
+                payload = parts[1].strip()
+
+        if not payload:
+            await update.message.reply_text(
+                "Использование: /league_debts [список долгов]\n"
+                "Пример строки: @A (...) — @B (...)"
+            )
+            return
+
+        entries = self.parse_league_debts_text(payload)
+        if not entries:
+            await update.message.reply_text(
+                "Не удалось распознать долги. Используйте строки вида: @A (...) — @B (...)"
+            )
+            return
+
+        chat_id = update.effective_chat.id
+        self.db.replace_league_debts(chat_id, entries)
+
+        summary_text = self.build_league_summary_text(chat_id)
+        await update.message.reply_text(
+            f"✅ Список долгов обновлен. Найдено записей: {len(entries)}\n\n{summary_text}"
+        )
+
+    async def cmd_league_debts_show(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        chat_id = update.effective_chat.id
+        text = self.build_league_summary_text(chat_id)
+        await update.message.reply_text(text)
+
+    async def cmd_league_debts_clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        chat_id = update.effective_chat.id
+        self.db.clear_league_debts(chat_id)
+        await update.message.reply_text("✅ Долги лиги очищены.")
+
+    async def cmd_league_reminder_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        chat_id = update.effective_chat.id
+        self.db.set_league_reminder_enabled(chat_id, True)
+        await update.message.reply_text(
+            "✅ Авто-напоминания по долгам включены.\n"
+            "Расписание: 09:00, 15:00, 20:00 (Europe/Moscow).\n"
+            "Пингуются только игроки с долгами > 2."
+        )
+
+    async def cmd_league_reminder_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        chat_id = update.effective_chat.id
+        self.db.set_league_reminder_enabled(chat_id, False)
+        await update.message.reply_text("✅ Авто-напоминания по долгам выключены.")
+
+    async def cmd_league_reminder_now(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        chat_id = update.effective_chat.id
+        settings = self.db.get_league_reminder_settings(chat_id)
+        threshold = settings.get('threshold', 2)
+
+        sent = await self.send_league_reminder_message(chat_id, threshold=threshold)
+        if sent:
+            await update.message.reply_text("✅ Напоминание отправлено.")
+        else:
+            await update.message.reply_text(
+                "Нет игроков с долгами > 2. Напоминание не отправлено."
+            )
     
     async def cmd_create_tournament(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):

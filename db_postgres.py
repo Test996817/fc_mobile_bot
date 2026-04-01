@@ -196,6 +196,38 @@ class Database:
                 PRIMARY KEY (tournament_id, user_id)
             )
         ''')
+
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS league_debt_entries (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                round_label TEXT,
+                debtor_username TEXT NOT NULL,
+                opponent_username TEXT,
+                raw_line TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS league_reminder_settings (
+                chat_id BIGINT PRIMARY KEY,
+                enabled INTEGER DEFAULT 0,
+                timezone TEXT DEFAULT 'Europe/Moscow',
+                threshold INTEGER DEFAULT 2,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS league_reminder_runs (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                slot_key TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(chat_id, slot_key)
+            )
+        ''')
         
         self.cursor.execute('''
             DO $$ BEGIN
@@ -356,6 +388,96 @@ class Database:
     def get_all_players(self) -> List[Dict]:
         self.cursor.execute('SELECT * FROM players WHERE ingame_nick IS NOT NULL ORDER BY rating DESC')
         return [dict(row) for row in self.cursor.fetchall()]
+
+    def replace_league_debts(self, chat_id: int, entries: List[Dict]):
+        self.cursor.execute('DELETE FROM league_debt_entries WHERE chat_id = %s', (chat_id,))
+
+        for entry in entries:
+            self.cursor.execute('''
+                INSERT INTO league_debt_entries (
+                    chat_id, round_label, debtor_username, opponent_username, raw_line
+                ) VALUES (%s, %s, %s, %s, %s)
+            ''', (
+                chat_id,
+                entry.get('round_label'),
+                entry.get('debtor_username'),
+                entry.get('opponent_username'),
+                entry.get('raw_line'),
+            ))
+
+        self.conn.commit()
+
+    def clear_league_debts(self, chat_id: int):
+        self.cursor.execute('DELETE FROM league_debt_entries WHERE chat_id = %s', (chat_id,))
+        self.conn.commit()
+
+    def get_league_debt_summary(self, chat_id: int) -> List[Dict]:
+        self.cursor.execute('''
+            SELECT debtor_username, COUNT(*) AS debts_count
+            FROM league_debt_entries
+            WHERE chat_id = %s
+            GROUP BY debtor_username
+            ORDER BY debts_count DESC, debtor_username ASC
+        ''', (chat_id,))
+        rows = self.cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    def get_league_debts_count(self, chat_id: int) -> int:
+        self.cursor.execute(
+            'SELECT COUNT(*) AS cnt FROM league_debt_entries WHERE chat_id = %s',
+            (chat_id,)
+        )
+        row = self.cursor.fetchone()
+        if not row:
+            return 0
+        return row['cnt']
+
+    def set_league_reminder_enabled(self, chat_id: int, enabled: bool):
+        enabled_int = 1 if enabled else 0
+        self.cursor.execute('''
+            INSERT INTO league_reminder_settings (chat_id, enabled, timezone, threshold, updated_at)
+            VALUES (%s, %s, 'Europe/Moscow', 2, CURRENT_TIMESTAMP)
+            ON CONFLICT (chat_id) DO UPDATE SET
+                enabled = EXCLUDED.enabled,
+                updated_at = CURRENT_TIMESTAMP
+        ''', (chat_id, enabled_int))
+        self.conn.commit()
+
+    def get_league_reminder_settings(self, chat_id: int) -> Dict:
+        self.cursor.execute('''
+            SELECT chat_id, enabled, timezone, threshold
+            FROM league_reminder_settings
+            WHERE chat_id = %s
+        ''', (chat_id,))
+        row = self.cursor.fetchone()
+
+        if not row:
+            return {
+                'chat_id': chat_id,
+                'enabled': 0,
+                'timezone': 'Europe/Moscow',
+                'threshold': 2,
+            }
+
+        return dict(row)
+
+    def get_enabled_league_reminder_chats(self) -> List[Dict]:
+        self.cursor.execute('''
+            SELECT chat_id, enabled, timezone, threshold
+            FROM league_reminder_settings
+            WHERE enabled = 1
+        ''')
+        rows = self.cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    def try_mark_league_reminder_run(self, chat_id: int, slot_key: str) -> bool:
+        self.cursor.execute('''
+            INSERT INTO league_reminder_runs (chat_id, slot_key)
+            VALUES (%s, %s)
+            ON CONFLICT (chat_id, slot_key) DO NOTHING
+        ''', (chat_id, slot_key))
+        self.conn.commit()
+        return self.cursor.rowcount > 0
     
     def delete_tournament_matches(self, tournament_id: int):
         self.cursor.execute('DELETE FROM matches WHERE tournament_id = %s', (tournament_id,))
