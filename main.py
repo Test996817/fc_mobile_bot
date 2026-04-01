@@ -1119,10 +1119,7 @@ class TournamentBot:
         self.application.add_handler(CommandHandler("aihealth", self.cmd_aihealth))
         self.application.add_handler(CommandHandler("gtable", self.cmd_groups_graphic))
         self.application.add_handler(CommandHandler("pbracket", self.cmd_playoff_graphic))
-        self.application.add_handler(CommandHandler("league_debts", self.cmd_league_debts))
         self.application.add_handler(CommandHandler("league_debts_show", self.cmd_league_debts_show))
-        self.application.add_handler(CommandHandler("league_debts_clear", self.cmd_league_debts_clear))
-        self.application.add_handler(CommandHandler("league_debts_post", self.cmd_league_debts_post))
         self.application.add_handler(CommandHandler("league_debts_round", self.cmd_league_debts_round))
         self.application.add_handler(CommandHandler("league_map_bulk", self.cmd_league_map_bulk))
         self.application.add_handler(CommandHandler("league_map_show", self.cmd_league_map_show))
@@ -1884,10 +1881,7 @@ class TournamentBot:
             "/gtable [theme] [orientation] - графическая таблица групп\n"
             "/pbracket [theme] [orientation] - графическая сетка плей-офф\n\n"
             "📌 Лига (долги):\n"
-            "/league_debts [текст] - загрузить список долгов\n"
             "/league_debts_show - сводка по долгам\n"
-            "/league_debts_clear - очистить долги\n"
-            "/league_debts_post - пост долгов по турам\n"
             "/league_debts_round [N] - долги только N тура\n"
             "/league_map_bulk [список] - массовая привязка клубов\n"
             "/league_map_show - показать привязки клубов\n"
@@ -2259,49 +2253,6 @@ class TournamentBot:
                 bot=context.bot,
             )
 
-    async def cmd_league_debts(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.db.is_admin(update.effective_user.id):
-            await update.message.reply_text("❌ Команда доступна только админам.")
-            return
-
-        payload = ""
-        if update.message and update.message.text:
-            parts = update.message.text.split(maxsplit=1)
-            if len(parts) > 1:
-                payload = parts[1].strip()
-
-        if not payload:
-            await update.message.reply_text(
-                "Использование: /league_debts [список долгов]\n"
-                "Пример строки: @A (...) — @B (...)"
-            )
-            return
-
-        entries = self.parse_league_debts_text(payload)
-        if not entries:
-            await update.message.reply_text(
-                "Не удалось распознать долги. Используйте строки вида: @A (...) — @B (...)"
-            )
-            return
-
-        expanded_entries = []
-        for entry in entries:
-            expanded_entries.append(entry)
-            expanded_entries.append({
-                'round_label': entry.get('round_label'),
-                'debtor_username': entry.get('opponent_username'),
-                'opponent_username': entry.get('debtor_username'),
-                'raw_line': entry.get('raw_line'),
-            })
-
-        chat_id = update.effective_chat.id
-        self.db.replace_league_debts(chat_id, expanded_entries)
-
-        summary_text = self.build_league_summary_text(chat_id)
-        await update.message.reply_text(
-            f"✅ Список долгов обновлен. Найдено матчей-долгов: {len(entries)}\n\n{summary_text}"
-        )
-
     async def cmd_league_debts_show(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
             await update.message.reply_text("❌ Команда доступна только админам.")
@@ -2310,23 +2261,6 @@ class TournamentBot:
         chat_id = update.effective_chat.id
         text = self.build_league_summary_text(chat_id)
         await update.message.reply_text(text)
-
-    async def cmd_league_debts_clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.db.is_admin(update.effective_user.id):
-            await update.message.reply_text("❌ Команда доступна только админам.")
-            return
-
-        chat_id = update.effective_chat.id
-        self.db.clear_league_debts(chat_id)
-        await update.message.reply_text("✅ Долги лиги очищены.")
-
-    async def cmd_league_debts_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.db.is_admin(update.effective_user.id):
-            await update.message.reply_text("❌ Команда доступна только админам.")
-            return
-
-        chat_id = update.effective_chat.id
-        await update.message.reply_text(self.format_league_debts_post(chat_id))
 
     async def cmd_league_debts_round(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
@@ -2424,6 +2358,7 @@ class TournamentBot:
             debts_post = self.format_league_debts_post(chat_id)
             await update.message.reply_text(
                 f"✅ Синк выполнен до {max_round} тура включительно.\n"
+                "Старые долги очищены, записаны актуальные данные после синка.\n"
                 f"Записей долгов: {result['entries_count']}\n"
                 f"Неразобранных матчей: {result['unresolved_matches']}"
             )
@@ -2464,6 +2399,7 @@ class TournamentBot:
             result = self.sync_challenge_stage_debts(chat_id, source['stage_url'], max_round)
             await update.message.reply_text(
                 f"✅ Повторный синк выполнен до {max_round} тура включительно.\n"
+                "Старые долги очищены, записаны актуальные данные после синка.\n"
                 f"Записей долгов: {result['entries_count']}"
             )
             await update.message.reply_text(self.format_league_debts_post(chat_id))
