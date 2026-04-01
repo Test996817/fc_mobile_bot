@@ -6,6 +6,7 @@ import os
 import re
 import random
 import asyncio
+import html
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
@@ -1668,7 +1669,13 @@ class TournamentBot:
         
         if joined:
             for i, p in enumerate(joined, 1):
-                text += f"  {i}. {p['ingame_nick']} (ELO: {p['rating']})\n"
+                nick = html.escape(p['ingame_nick'] or "?")
+                user_id = p.get('user_id')
+                if user_id:
+                    linked_nick = f"<a href=\"tg://user?id={user_id}\">{nick}</a>"
+                else:
+                    linked_nick = nick
+                text += f"  {i}. {linked_nick} (ELO: {p['rating']})\n"
         else:
             text += "  Пока никто не присоединился\n"
         
@@ -1687,7 +1694,8 @@ class TournamentBot:
                 chat_id=chat_id,
                 text=text,
                 reply_markup=reply_markup,
-                message_thread_id=tournament.get('topic_id')
+                message_thread_id=tournament.get('topic_id'),
+                parse_mode='HTML'
             )
             self.db.update_tournament_reg_message(tournament_id, msg.message_id)
         except Exception as e:
@@ -1707,7 +1715,13 @@ class TournamentBot:
         
         if joined:
             for i, p in enumerate(joined, 1):
-                text += f"  {i}. {p['ingame_nick']} (ELO: {p['rating']})\n"
+                nick = html.escape(p['ingame_nick'] or "?")
+                user_id = p.get('user_id')
+                if user_id:
+                    linked_nick = f"<a href=\"tg://user?id={user_id}\">{nick}</a>"
+                else:
+                    linked_nick = nick
+                text += f"  {i}. {linked_nick} (ELO: {p['rating']})\n"
         else:
             text += "  Пока никто не присоединился\n"
         
@@ -1734,7 +1748,8 @@ class TournamentBot:
                     message_id=reg_message_id,
                     text=text,
                     reply_markup=reply_markup,
-                    message_thread_id=topic_id
+                    message_thread_id=topic_id,
+                    parse_mode='HTML'
                 )
                 logger.info("Join message updated successfully")
             except Exception as e:
