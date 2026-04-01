@@ -9,6 +9,7 @@ import asyncio
 import html
 import urllib.request
 import urllib.error
+from difflib import SequenceMatcher
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional, Tuple
@@ -1075,6 +1076,28 @@ class ScreenshotAnalyzer:
         
         return None, None
 
+    def extract_nick_tokens(self, text: str) -> List[str]:
+        if not text:
+            return []
+
+        tokens = []
+        seen = set()
+        patterns = [
+            r'@([A-Za-zА-Яа-я0-9_.-]{2,32})',
+            r'\b([A-Za-zА-Яа-я0-9_.-]{3,32})\b',
+        ]
+
+        for pattern in patterns:
+            for match in re.finditer(pattern, text):
+                token = match.group(1).strip().lower().lstrip('@')
+                if token.isdigit():
+                    continue
+                if token not in seen:
+                    seen.add(token)
+                    tokens.append(token)
+
+        return tokens
+
 
 class TournamentBot:
     def __init__(self, token: str):
@@ -1721,43 +1744,46 @@ class TournamentBot:
         
         photos = update.message.photo
         
+        pending_matches = self.db.get_player_matches(user_id, tournament['id'], 'pending')
+        if not pending_matches:
+            await update.message.reply_text("❌ У тебя нет ожидающих матчей для отправки результата.")
+            return
+
+        pending_by_id = {}
+        pending_nicks = {}
+        for m in pending_matches:
+            p1 = self.db.get_player(m['player1_id'])
+            p2 = self.db.get_player(m['player2_id'])
+            if not p1 or not p2:
+                continue
+            pending_by_id[m['id']] = (m, p1, p2)
+            pending_nicks[m['id']] = {
+                p1['user_id']: (p1.get('ingame_nick') or '').lower(),
+                p2['user_id']: (p2.get('ingame_nick') or '').lower(),
+            }
+
         caption = update.message.caption or ""
-        
-        if not caption:
-            await update.message.reply_text(
-                "❌ Укажи ники игроков под скриншотом:\n"
-                "player1 - player2"
-            )
-            return
-        
-        nick_match = re.match(r'@?(\S+)\s*[-–]\s*@?(\S+)', caption)
-        if not nick_match:
-            await update.message.reply_text(
-                "❌ Неверный формат. Используй:\n"
-                "player1 - player2"
-            )
-            return
-        
-        nick1 = nick_match.group(1).replace('@', '')
-        nick2 = nick_match.group(2).replace('@', '')
-        
-        p1 = self.db.get_player_by_nick(nick1)
-        p2 = self.db.get_player_by_nick(nick2)
-        
-        if not p1:
-            await update.message.reply_text(f"❌ Игрок '{nick1}' не найден в базе.")
-            return
-        if not p2:
-            await update.message.reply_text(f"❌ Игрок '{nick2}' не найден в базе.")
-            return
-        
-        match = self.db.find_match_between_players(tournament['id'], p1['user_id'], p2['user_id'])
-        if not match:
-            await update.message.reply_text("❌ Нет ожидающего матча между этими игроками.")
-            return
+        caption_match = None
+        if caption:
+            nick_match = re.match(r'@?(\S+)\s*[-–]\s*@?(\S+)', caption)
+            if nick_match:
+                nick1 = nick_match.group(1).replace('@', '')
+                nick2 = nick_match.group(2).replace('@', '')
+                cp1 = self.db.get_player_by_nick(nick1)
+                cp2 = self.db.get_player_by_nick(nick2)
+                if cp1 and cp2:
+                    cmatch = self.db.find_match_between_players(tournament['id'], cp1['user_id'], cp2['user_id'])
+                    if cmatch:
+                        caption_match = (cmatch, cp1, cp2)
         
         results = []
         unrecognized = []
+        unresolved_nicks = []
+
+        def similarity(a: str, b: str) -> float:
+            if not a or not b:
+                return 0.0
+            return SequenceMatcher(None, a, b).ratio()
         
         for i, photo in enumerate(photos):
             try:
@@ -1767,19 +1793,73 @@ class TournamentBot:
                 
                 screenshot_text = self.screenshot_analyzer.extract_text(photo_path)
                 score1, score2 = self.screenshot_analyzer.extract_scores(screenshot_text)
+                nick_tokens = self.screenshot_analyzer.extract_nick_tokens(screenshot_text)
+
+                best_match_id = None
+                best_score = 0.0
+                second_score = 0.0
+                detected_order = None
+
+                for match_id, nick_map in pending_nicks.items():
+                    m, p1, p2 = pending_by_id[match_id]
+                    nick_p1 = nick_map.get(p1['user_id'], '')
+                    nick_p2 = nick_map.get(p2['user_id'], '')
+
+                    p1_best = max((similarity(token, nick_p1) for token in nick_tokens), default=0.0)
+                    p2_best = max((similarity(token, nick_p2) for token in nick_tokens), default=0.0)
+
+                    if p1_best < 0.74 or p2_best < 0.74:
+                        continue
+
+                    total = p1_best + p2_best
+                    if total > best_score:
+                        second_score = best_score
+                        best_score = total
+                        best_match_id = match_id
+
+                        text_lower = screenshot_text.lower()
+                        pos1 = text_lower.find(nick_p1)
+                        pos2 = text_lower.find(nick_p2)
+                        if pos1 != -1 and pos2 != -1:
+                            detected_order = (p1['user_id'], p2['user_id']) if pos1 <= pos2 else (p2['user_id'], p1['user_id'])
+                        else:
+                            detected_order = None
+                    elif total > second_score:
+                        second_score = total
+
+                if best_match_id is None or (best_score - second_score) < 0.08 or detected_order is None:
+                    if caption_match:
+                        match, p1, p2 = caption_match
+                        detected_order = (p1['user_id'], p2['user_id'])
+                    else:
+                        unresolved_nicks.append(i + 1)
+                        continue
+                else:
+                    match, p1, p2 = pending_by_id[best_match_id]
                 
                 if score1 is not None and score2 is not None:
-                    if score1 > score2:
+                    first_user_id, second_user_id = detected_order
+                    score_by_user = {
+                        first_user_id: score1,
+                        second_user_id: score2,
+                    }
+                    p1_score = score_by_user.get(p1['user_id'])
+                    p2_score = score_by_user.get(p2['user_id'])
+
+                    if p1_score is None or p2_score is None:
+                        unresolved_nicks.append(i + 1)
+                        continue
+
+                    if p1_score > p2_score:
                         winner_id = p1['user_id']
-                    elif score2 > score1:
+                    elif p2_score > p1_score:
                         winner_id = p2['user_id']
                     else:
                         winner_id = None
                     
-                    await self.process_match_result(match, score1, score2, winner_id, user_id, photo.file_id)
+                    await self.process_match_result(match, p1_score, p2_score, winner_id, user_id, photo.file_id)
                     
-                    winner_text = f"{nick1}" if winner_id == p1['user_id'] else f"{nick2}" if winner_id == p2['user_id'] else "Ничья"
-                    results.append(f"📸 {nick1} {score1}:{score2} {nick2}")
+                    results.append(f"📸 {p1['ingame_nick']} {p1_score}:{p2_score} {p2['ingame_nick']}")
                 else:
                     unrecognized.append(i + 1)
             except Exception as e:
@@ -1790,15 +1870,27 @@ class TournamentBot:
             self.cooldowns[user_id] = current_time
             text = f"✅ Результаты ({len(results)}/{len(photos)}):\n"
             text += "\n".join(results)
+            if unresolved_nicks:
+                text += (
+                    f"\n\n❌ Не удалось распознать ники ({len(unresolved_nicks)}/{len(photos)}): "
+                    f"скриншот {', '.join(map(str, unresolved_nicks))}"
+                )
+                text += "\nНапиши ники в формате: player1 - player2"
             if unrecognized:
                 text += f"\n\n❌ Не распознано ({len(unrecognized)}/{len(photos)}): скриншот {', '.join(map(str, unrecognized))}"
                 text += "\nИспользуйте /gresult для ввода оставшихся результатов."
             await update.message.reply_text(text)
         else:
-            await update.message.reply_text(
-                "❌ Не удалось распознать счёт ни на одном скриншоте.\n"
-                "Используйте /gresult для ввода результата."
-            )
+            if unresolved_nicks and not unrecognized:
+                await update.message.reply_text(
+                    "❌ Не удалось распознать ники игроков на скриншотах.\n"
+                    "Напиши ники в формате: player1 - player2"
+                )
+            else:
+                await update.message.reply_text(
+                    "❌ Не удалось распознать счёт/ники на скриншотах.\n"
+                    "Напиши ники в формате: player1 - player2 или используй /gresult."
+                )
     
     async def process_match_result(self, match: Dict, score1: int, score2: int,
                                   winner_id: int, reported_by: int, screenshot_id: str = None):
