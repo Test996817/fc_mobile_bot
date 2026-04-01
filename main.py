@@ -244,9 +244,21 @@ class Database:
                 enabled INTEGER DEFAULT 0,
                 timezone TEXT DEFAULT 'Europe/Moscow',
                 threshold INTEGER DEFAULT 2,
+                hourly_enabled INTEGER DEFAULT 0,
+                hourly_text TEXT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+
+        try:
+            self.cursor.execute('ALTER TABLE league_reminder_settings ADD COLUMN hourly_enabled INTEGER DEFAULT 0')
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            self.cursor.execute('ALTER TABLE league_reminder_settings ADD COLUMN hourly_text TEXT')
+        except sqlite3.OperationalError:
+            pass
 
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS league_reminder_runs (
@@ -494,17 +506,33 @@ class Database:
     def set_league_reminder_enabled(self, chat_id: int, enabled: bool):
         enabled_int = 1 if enabled else 0
         self.cursor.execute('''
-            INSERT INTO league_reminder_settings (chat_id, enabled, timezone, threshold, updated_at)
-            VALUES (?, ?, 'Europe/Moscow', 2, CURRENT_TIMESTAMP)
+            INSERT INTO league_reminder_settings (
+                chat_id, enabled, timezone, threshold, hourly_enabled, hourly_text, updated_at
+            )
+            VALUES (?, ?, 'Europe/Moscow', 2, 0, NULL, CURRENT_TIMESTAMP)
             ON CONFLICT(chat_id) DO UPDATE SET
                 enabled = excluded.enabled,
                 updated_at = CURRENT_TIMESTAMP
         ''', (chat_id, enabled_int))
         self.conn.commit()
 
+    def set_league_hourly_reminder(self, chat_id: int, enabled: bool, hourly_text: Optional[str] = None):
+        enabled_int = 1 if enabled else 0
+        self.cursor.execute('''
+            INSERT INTO league_reminder_settings (
+                chat_id, enabled, timezone, threshold, hourly_enabled, hourly_text, updated_at
+            )
+            VALUES (?, 0, 'Europe/Moscow', 2, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                hourly_enabled = excluded.hourly_enabled,
+                hourly_text = excluded.hourly_text,
+                updated_at = CURRENT_TIMESTAMP
+        ''', (chat_id, enabled_int, hourly_text))
+        self.conn.commit()
+
     def get_league_reminder_settings(self, chat_id: int) -> Dict:
         self.cursor.execute('''
-            SELECT chat_id, enabled, timezone, threshold
+            SELECT chat_id, enabled, timezone, threshold, hourly_enabled, hourly_text
             FROM league_reminder_settings
             WHERE chat_id = ?
         ''', (chat_id,))
@@ -516,6 +544,8 @@ class Database:
                 'enabled': 0,
                 'timezone': 'Europe/Moscow',
                 'threshold': 2,
+                'hourly_enabled': 0,
+                'hourly_text': None,
             }
 
         return {
@@ -523,13 +553,15 @@ class Database:
             'enabled': row[1],
             'timezone': row[2],
             'threshold': row[3],
+            'hourly_enabled': row[4],
+            'hourly_text': row[5],
         }
 
     def get_enabled_league_reminder_chats(self) -> List[Dict]:
         self.cursor.execute('''
-            SELECT chat_id, enabled, timezone, threshold
+            SELECT chat_id, enabled, timezone, threshold, hourly_enabled, hourly_text
             FROM league_reminder_settings
-            WHERE enabled = 1
+            WHERE enabled = 1 OR hourly_enabled = 1
         ''')
 
         rows = self.cursor.fetchall()
@@ -539,6 +571,8 @@ class Database:
                 'enabled': row[1],
                 'timezone': row[2],
                 'threshold': row[3],
+                'hourly_enabled': row[4],
+                'hourly_text': row[5],
             }
             for row in rows
         ]
@@ -1006,8 +1040,11 @@ class EloCalculator:
 
 
 class ScreenshotAnalyzer:
+    DEFAULT_MAX_PLAUSIBLE_SCORE = 20
+
     def __init__(self):
         self.ocr_available = False
+        self.max_plausible_score = self._load_max_plausible_score()
         try:
             import pytesseract
             from PIL import Image
@@ -1018,6 +1055,22 @@ class ScreenshotAnalyzer:
             logger.info("OCR module loaded successfully")
         except ImportError as e:
             logger.warning(f"OCR not available: {e}")
+
+    def _load_max_plausible_score(self) -> int:
+        raw_value = os.getenv("OCR_MAX_SCORE", str(self.DEFAULT_MAX_PLAUSIBLE_SCORE)).strip()
+        try:
+            value = int(raw_value)
+            if 0 <= value <= 99:
+                return value
+        except (TypeError, ValueError):
+            pass
+
+        logger.warning(
+            "Invalid OCR_MAX_SCORE '%s', using default %d",
+            raw_value,
+            self.DEFAULT_MAX_PLAUSIBLE_SCORE,
+        )
+        return self.DEFAULT_MAX_PLAUSIBLE_SCORE
     
     def extract_text(self, photo_path: str) -> str:
         if not self.ocr_available:
@@ -1042,7 +1095,7 @@ class ScreenshotAnalyzer:
             if len(numbers) == 4:
                 s1 = int(numbers[0] + numbers[1])
                 s2 = int(numbers[2] + numbers[3])
-                if 0 <= s1 <= 99 and 0 <= s2 <= 99:
+                if 0 <= s1 <= self.max_plausible_score and 0 <= s2 <= self.max_plausible_score:
                     return s1, s2
             
             match = re.search(r'(\d)\s+(\d)\s*[^\w\s]\s*(\d{1,2})', line)
@@ -1050,7 +1103,7 @@ class ScreenshotAnalyzer:
                 try:
                     s1 = int(match.group(1) + match.group(2))
                     s2 = int(match.group(3))
-                    if 0 <= s1 <= 99 and 0 <= s2 <= 99:
+                    if 0 <= s1 <= self.max_plausible_score and 0 <= s2 <= self.max_plausible_score:
                         return s1, s2
                 except ValueError:
                     pass
@@ -1059,7 +1112,7 @@ class ScreenshotAnalyzer:
             if match:
                 try:
                     s1, s2 = int(match.group(1)), int(match.group(2))
-                    if 0 <= s1 <= 99 and 0 <= s2 <= 99:
+                    if 0 <= s1 <= self.max_plausible_score and 0 <= s2 <= self.max_plausible_score:
                         return s1, s2
                 except ValueError:
                     pass
@@ -1069,7 +1122,7 @@ class ScreenshotAnalyzer:
         for s1, s2 in pairs:
             try:
                 n1, n2 = int(s1), int(s2)
-                if 0 <= n1 <= 99 and 0 <= n2 <= 99:
+                if 0 <= n1 <= self.max_plausible_score and 0 <= n2 <= self.max_plausible_score:
                     return n1, n2
             except ValueError:
                 continue
@@ -1153,6 +1206,8 @@ class TournamentBot:
         self.application.add_handler(CommandHandler("league_reminder_on", self.cmd_league_reminder_on))
         self.application.add_handler(CommandHandler("league_reminder_off", self.cmd_league_reminder_off))
         self.application.add_handler(CommandHandler("league_reminder_now", self.cmd_league_reminder_now))
+        self.application.add_handler(CommandHandler("league_reminder_hourly_on", self.cmd_league_reminder_hourly_on))
+        self.application.add_handler(CommandHandler("league_reminder_hourly_off", self.cmd_league_reminder_hourly_off))
         
         self.application.add_handler(MessageHandler(
             filters.Regex(r'^!nick\s+(\S.+)'), 
@@ -1983,7 +2038,9 @@ class TournamentBot:
             "/league_sync_off - выключить синк источника\n"
             "/league_reminder_on - включить авто-напоминания\n"
             "/league_reminder_off - выключить авто-напоминания\n"
-            "/league_reminder_now - отправить напоминание сейчас\n\n"
+            "/league_reminder_now - отправить напоминание сейчас\n"
+            "/league_reminder_hourly_on [текст] - включить каждый час\n"
+            "/league_reminder_hourly_off - выключить каждый час\n\n"
             "📊 Аналитика и сервис:\n"
             "/elo - таблица рейтинга\n"
             "/tinfo [ID] - информация по турниру\n"
@@ -2294,7 +2351,13 @@ class TournamentBot:
         lines.append(f"Порог для напоминания: > {threshold}")
         return "\n".join(lines)
 
-    async def send_league_reminder_message(self, chat_id: int, threshold: int = 2, bot=None) -> bool:
+    async def send_league_reminder_message(
+        self,
+        chat_id: int,
+        threshold: int = 2,
+        bot=None,
+        custom_text: Optional[str] = None,
+    ) -> bool:
         summary = self.db.get_league_debt_summary(chat_id)
         debtors = [row for row in summary if row['debts_count'] > threshold]
 
@@ -2306,7 +2369,7 @@ class TournamentBot:
             "🔔 Напоминание по долгам в лиге",
             f"{mentions}",
             "",
-            "У вас больше 2 долгов. Пожалуйста, сыграйте долги сегодня.",
+            custom_text or "У вас больше 2 долгов. Пожалуйста, сыграйте долги сегодня.",
             "",
             "Текущие долги:",
         ]
@@ -2325,25 +2388,38 @@ class TournamentBot:
     async def league_reminder_scheduler(self, context: ContextTypes.DEFAULT_TYPE):
         now_msk = datetime.now(self.moscow_tz)
         time_key = now_msk.strftime("%H:%M")
+        is_daily_slot = time_key in self.league_reminder_times
+        is_hourly_slot = now_msk.minute == 0
 
-        if time_key not in self.league_reminder_times:
+        if not is_daily_slot and not is_hourly_slot:
             return
-
-        slot_key = now_msk.strftime("%Y-%m-%d %H:%M")
         chats = self.db.get_enabled_league_reminder_chats()
 
         for cfg in chats:
             chat_id = cfg['chat_id']
             threshold = cfg.get('threshold', 2)
+            daily_enabled = bool(cfg.get('enabled'))
+            hourly_enabled = bool(cfg.get('hourly_enabled'))
+            hourly_text = cfg.get('hourly_text')
 
-            if not self.db.try_mark_league_reminder_run(chat_id, slot_key):
-                continue
+            if is_daily_slot and daily_enabled:
+                daily_slot_key = f"daily:{now_msk.strftime('%Y-%m-%d %H:%M')}"
+                if self.db.try_mark_league_reminder_run(chat_id, daily_slot_key):
+                    await self.send_league_reminder_message(
+                        chat_id=chat_id,
+                        threshold=threshold,
+                        bot=context.bot,
+                    )
 
-            await self.send_league_reminder_message(
-                chat_id=chat_id,
-                threshold=threshold,
-                bot=context.bot,
-            )
+            if is_hourly_slot and hourly_enabled:
+                hourly_slot_key = f"hourly:{now_msk.strftime('%Y-%m-%d %H:00')}"
+                if self.db.try_mark_league_reminder_run(chat_id, hourly_slot_key):
+                    await self.send_league_reminder_message(
+                        chat_id=chat_id,
+                        threshold=threshold,
+                        bot=context.bot,
+                        custom_text=hourly_text or "Напоминание: сыграйте долги в лиге.",
+                    )
 
     async def cmd_league_debts_show(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
@@ -2546,6 +2622,32 @@ class TournamentBot:
             await update.message.reply_text(
                 "Нет игроков с долгами > 2. Напоминание не отправлено."
             )
+
+    async def cmd_league_reminder_hourly_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        chat_id = update.effective_chat.id
+        hourly_text = " ".join(context.args).strip() if context.args else ""
+        if not hourly_text:
+            hourly_text = "Напоминание: сыграйте долги в лиге."
+
+        self.db.set_league_hourly_reminder(chat_id, True, hourly_text)
+        await update.message.reply_text(
+            "✅ Ежечасное напоминание включено.\n"
+            "Отправка: каждый час в :00 (Europe/Moscow).\n"
+            f"Текст: {hourly_text}"
+        )
+
+    async def cmd_league_reminder_hourly_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        chat_id = update.effective_chat.id
+        self.db.set_league_hourly_reminder(chat_id, False, None)
+        await update.message.reply_text("✅ Ежечасное напоминание выключено.")
     
     async def cmd_create_tournament(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):

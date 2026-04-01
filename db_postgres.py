@@ -215,8 +215,24 @@ class Database:
                 enabled INTEGER DEFAULT 0,
                 timezone TEXT DEFAULT 'Europe/Moscow',
                 threshold INTEGER DEFAULT 2,
+                hourly_enabled INTEGER DEFAULT 0,
+                hourly_text TEXT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
+        ''')
+
+        self.cursor.execute('''
+            DO $$ BEGIN
+                ALTER TABLE league_reminder_settings ADD COLUMN hourly_enabled INTEGER DEFAULT 0;
+            EXCEPTION WHEN others THEN NULL;
+            END $$;
+        ''')
+
+        self.cursor.execute('''
+            DO $$ BEGIN
+                ALTER TABLE league_reminder_settings ADD COLUMN hourly_text TEXT;
+            EXCEPTION WHEN others THEN NULL;
+            END $$;
         ''')
 
         self.cursor.execute('''
@@ -457,17 +473,33 @@ class Database:
     def set_league_reminder_enabled(self, chat_id: int, enabled: bool):
         enabled_int = 1 if enabled else 0
         self.cursor.execute('''
-            INSERT INTO league_reminder_settings (chat_id, enabled, timezone, threshold, updated_at)
-            VALUES (%s, %s, 'Europe/Moscow', 2, CURRENT_TIMESTAMP)
+            INSERT INTO league_reminder_settings (
+                chat_id, enabled, timezone, threshold, hourly_enabled, hourly_text, updated_at
+            )
+            VALUES (%s, %s, 'Europe/Moscow', 2, 0, NULL, CURRENT_TIMESTAMP)
             ON CONFLICT (chat_id) DO UPDATE SET
                 enabled = EXCLUDED.enabled,
                 updated_at = CURRENT_TIMESTAMP
         ''', (chat_id, enabled_int))
         self.conn.commit()
 
+    def set_league_hourly_reminder(self, chat_id: int, enabled: bool, hourly_text: Optional[str] = None):
+        enabled_int = 1 if enabled else 0
+        self.cursor.execute('''
+            INSERT INTO league_reminder_settings (
+                chat_id, enabled, timezone, threshold, hourly_enabled, hourly_text, updated_at
+            )
+            VALUES (%s, 0, 'Europe/Moscow', 2, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (chat_id) DO UPDATE SET
+                hourly_enabled = EXCLUDED.hourly_enabled,
+                hourly_text = EXCLUDED.hourly_text,
+                updated_at = CURRENT_TIMESTAMP
+        ''', (chat_id, enabled_int, hourly_text))
+        self.conn.commit()
+
     def get_league_reminder_settings(self, chat_id: int) -> Dict:
         self.cursor.execute('''
-            SELECT chat_id, enabled, timezone, threshold
+            SELECT chat_id, enabled, timezone, threshold, hourly_enabled, hourly_text
             FROM league_reminder_settings
             WHERE chat_id = %s
         ''', (chat_id,))
@@ -479,15 +511,17 @@ class Database:
                 'enabled': 0,
                 'timezone': 'Europe/Moscow',
                 'threshold': 2,
+                'hourly_enabled': 0,
+                'hourly_text': None,
             }
 
         return dict(row)
 
     def get_enabled_league_reminder_chats(self) -> List[Dict]:
         self.cursor.execute('''
-            SELECT chat_id, enabled, timezone, threshold
+            SELECT chat_id, enabled, timezone, threshold, hourly_enabled, hourly_text
             FROM league_reminder_settings
-            WHERE enabled = 1
+            WHERE enabled = 1 OR hourly_enabled = 1
         ''')
         rows = self.cursor.fetchall()
         return [dict(row) for row in rows]
