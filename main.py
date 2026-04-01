@@ -2284,12 +2284,22 @@ class TournamentBot:
             )
             return
 
+        expanded_entries = []
+        for entry in entries:
+            expanded_entries.append(entry)
+            expanded_entries.append({
+                'round_label': entry.get('round_label'),
+                'debtor_username': entry.get('opponent_username'),
+                'opponent_username': entry.get('debtor_username'),
+                'raw_line': entry.get('raw_line'),
+            })
+
         chat_id = update.effective_chat.id
-        self.db.replace_league_debts(chat_id, entries)
+        self.db.replace_league_debts(chat_id, expanded_entries)
 
         summary_text = self.build_league_summary_text(chat_id)
         await update.message.reply_text(
-            f"✅ Список долгов обновлен. Найдено записей: {len(entries)}\n\n{summary_text}"
+            f"✅ Список долгов обновлен. Найдено матчей-долгов: {len(entries)}\n\n{summary_text}"
         )
 
     async def cmd_league_debts_show(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
