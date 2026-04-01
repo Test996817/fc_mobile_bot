@@ -1940,6 +1940,7 @@ class TournamentBot:
         normalized = normalized.replace('ё', 'е').replace('ë', 'е')
         normalized = re.sub(r'\s+', ' ', normalized)
         normalized = normalized.replace(' - ', '-')
+        normalized = normalized.replace('глимпт', 'глимт')
         return normalized
 
     def parse_league_map_bulk_text(self, raw_text: str) -> List[Dict]:
@@ -2022,7 +2023,21 @@ class TournamentBot:
 
         for _, label, entries in round_items:
             lines.append(f"{label}:")
+            unique_entries = []
+            seen_pairs = set()
             for item in entries:
+                debtor = (item.get('debtor_username') or '').lower()
+                opponent = (item.get('opponent_username') or '').lower()
+                pair_key = tuple(sorted([debtor, opponent]))
+
+                if debtor and opponent and pair_key in seen_pairs:
+                    continue
+
+                if debtor and opponent:
+                    seen_pairs.add(pair_key)
+                unique_entries.append(item)
+
+            for item in unique_entries:
                 lines.append(item['raw_line'])
             lines.append("")
 
@@ -2033,11 +2048,25 @@ class TournamentBot:
         by_round = self.db.get_league_debts_by_round(chat_id)
         entries = by_round.get(target_label, [])
 
+        unique_entries = []
+        seen_pairs = set()
+        for item in entries:
+            debtor = (item.get('debtor_username') or '').lower()
+            opponent = (item.get('opponent_username') or '').lower()
+            pair_key = tuple(sorted([debtor, opponent]))
+
+            if debtor and opponent and pair_key in seen_pairs:
+                continue
+
+            if debtor and opponent:
+                seen_pairs.add(pair_key)
+            unique_entries.append(item)
+
         lines = [f"{target_label}:"]
-        if not entries:
+        if not unique_entries:
             lines.append("Нет долгов.")
         else:
-            for item in entries:
+            for item in unique_entries:
                 lines.append(item['raw_line'])
         return "\n".join(lines)
 
