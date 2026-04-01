@@ -7,7 +7,9 @@ import re
 import random
 import asyncio
 import html
-from datetime import datetime, timedelta
+import urllib.request
+import urllib.error
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
@@ -252,6 +254,28 @@ class Database:
                 slot_key TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(chat_id, slot_key)
+            )
+        ''')
+
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS league_team_map (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                team_name_norm TEXT NOT NULL,
+                team_name_raw TEXT NOT NULL,
+                telegram_username TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(chat_id, team_name_norm)
+            )
+        ''')
+
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS league_challenge_sources (
+                chat_id INTEGER PRIMARY KEY,
+                stage_url TEXT NOT NULL,
+                max_round INTEGER NOT NULL,
+                enabled INTEGER DEFAULT 1,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
@@ -525,6 +549,97 @@ class Database:
         ''', (chat_id, slot_key))
         self.conn.commit()
         return self.cursor.rowcount > 0
+
+    def replace_league_team_map(self, chat_id: int, mappings: List[Dict]):
+        self.cursor.execute('DELETE FROM league_team_map WHERE chat_id = ?', (chat_id,))
+
+        for item in mappings:
+            self.cursor.execute('''
+                INSERT INTO league_team_map (chat_id, team_name_norm, team_name_raw, telegram_username)
+                VALUES (?, ?, ?, ?)
+            ''', (
+                chat_id,
+                item['team_name_norm'],
+                item['team_name_raw'],
+                item['telegram_username'],
+            ))
+
+        self.conn.commit()
+
+    def clear_league_team_map(self, chat_id: int):
+        self.cursor.execute('DELETE FROM league_team_map WHERE chat_id = ?', (chat_id,))
+        self.conn.commit()
+
+    def get_league_team_map(self, chat_id: int) -> List[Dict]:
+        self.cursor.execute('''
+            SELECT team_name_norm, team_name_raw, telegram_username
+            FROM league_team_map
+            WHERE chat_id = ?
+            ORDER BY team_name_raw ASC
+        ''', (chat_id,))
+        rows = self.cursor.fetchall()
+        return [
+            {
+                'team_name_norm': row[0],
+                'team_name_raw': row[1],
+                'telegram_username': row[2],
+            }
+            for row in rows
+        ]
+
+    def set_league_challenge_source(self, chat_id: int, stage_url: str, max_round: int):
+        self.cursor.execute('''
+            INSERT INTO league_challenge_sources (chat_id, stage_url, max_round, enabled, updated_at)
+            VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                stage_url = excluded.stage_url,
+                max_round = excluded.max_round,
+                enabled = 1,
+                updated_at = CURRENT_TIMESTAMP
+        ''', (chat_id, stage_url, max_round))
+        self.conn.commit()
+
+    def get_league_challenge_source(self, chat_id: int) -> Optional[Dict]:
+        self.cursor.execute('''
+            SELECT chat_id, stage_url, max_round, enabled
+            FROM league_challenge_sources
+            WHERE chat_id = ?
+        ''', (chat_id,))
+        row = self.cursor.fetchone()
+        if not row:
+            return None
+        return {
+            'chat_id': row[0],
+            'stage_url': row[1],
+            'max_round': row[2],
+            'enabled': row[3],
+        }
+
+    def disable_league_challenge_source(self, chat_id: int):
+        self.cursor.execute('''
+            UPDATE league_challenge_sources
+            SET enabled = 0, updated_at = CURRENT_TIMESTAMP
+            WHERE chat_id = ?
+        ''', (chat_id,))
+        self.conn.commit()
+
+    def get_league_debts_by_round(self, chat_id: int) -> Dict[str, List[Dict]]:
+        self.cursor.execute('''
+            SELECT round_label, debtor_username, opponent_username, raw_line
+            FROM league_debt_entries
+            WHERE chat_id = ?
+            ORDER BY id ASC
+        ''', (chat_id,))
+        rows = self.cursor.fetchall()
+        result = {}
+        for row in rows:
+            round_label = row[0] or 'Без тура'
+            result.setdefault(round_label, []).append({
+                'debtor_username': row[1],
+                'opponent_username': row[2],
+                'raw_line': row[3],
+            })
+        return result
     
     def delete_tournament_matches(self, tournament_id: int):
         self.cursor.execute('DELETE FROM matches WHERE tournament_id = ?', (tournament_id,))
@@ -974,7 +1089,11 @@ class TournamentBot:
         self.cooldowns = {}
         self.ai_cooldowns = {}
         self.league_reminder_times = {"09:00", "15:00", "20:00"}
-        self.moscow_tz = ZoneInfo("Europe/Moscow")
+        try:
+            self.moscow_tz = ZoneInfo("Europe/Moscow")
+        except Exception:
+            self.moscow_tz = timezone(timedelta(hours=3))
+            logger.warning("Europe/Moscow timezone not found, using UTC+3 fallback")
         self.setup_handlers()
         self.setup_jobs()
     
@@ -1003,6 +1122,14 @@ class TournamentBot:
         self.application.add_handler(CommandHandler("league_debts", self.cmd_league_debts))
         self.application.add_handler(CommandHandler("league_debts_show", self.cmd_league_debts_show))
         self.application.add_handler(CommandHandler("league_debts_clear", self.cmd_league_debts_clear))
+        self.application.add_handler(CommandHandler("league_debts_post", self.cmd_league_debts_post))
+        self.application.add_handler(CommandHandler("league_debts_round", self.cmd_league_debts_round))
+        self.application.add_handler(CommandHandler("league_map_bulk", self.cmd_league_map_bulk))
+        self.application.add_handler(CommandHandler("league_map_show", self.cmd_league_map_show))
+        self.application.add_handler(CommandHandler("league_map_clear", self.cmd_league_map_clear))
+        self.application.add_handler(CommandHandler("league_sync_challenge", self.cmd_league_sync_challenge))
+        self.application.add_handler(CommandHandler("league_sync_now", self.cmd_league_sync_now))
+        self.application.add_handler(CommandHandler("league_sync_off", self.cmd_league_sync_off))
         self.application.add_handler(CommandHandler("league_reminder_on", self.cmd_league_reminder_on))
         self.application.add_handler(CommandHandler("league_reminder_off", self.cmd_league_reminder_off))
         self.application.add_handler(CommandHandler("league_reminder_now", self.cmd_league_reminder_now))
@@ -1760,6 +1887,14 @@ class TournamentBot:
             "/league_debts [текст] - загрузить список долгов\n"
             "/league_debts_show - сводка по долгам\n"
             "/league_debts_clear - очистить долги\n"
+            "/league_debts_post - пост долгов по турам\n"
+            "/league_debts_round [N] - долги только N тура\n"
+            "/league_map_bulk [список] - массовая привязка клубов\n"
+            "/league_map_show - показать привязки клубов\n"
+            "/league_map_clear - очистить привязки клубов\n"
+            "/league_sync_challenge [url] [N] - синк до N тура\n"
+            "/league_sync_now [N] - повторный синк\n"
+            "/league_sync_off - выключить синк источника\n"
             "/league_reminder_on - включить авто-напоминания\n"
             "/league_reminder_off - выключить авто-напоминания\n"
             "/league_reminder_now - отправить напоминание сейчас\n\n"
@@ -1799,6 +1934,233 @@ class TournamentBot:
             })
 
         return entries
+
+    def normalize_team_name(self, team_name: str) -> str:
+        normalized = (team_name or "").strip().lower()
+        normalized = normalized.replace('ё', 'е').replace('ë', 'е')
+        normalized = re.sub(r'\s+', ' ', normalized)
+        normalized = normalized.replace(' - ', '-')
+        return normalized
+
+    def parse_league_map_bulk_text(self, raw_text: str) -> List[Dict]:
+        mappings = []
+        for line in raw_text.splitlines():
+            cleaned = line.strip()
+            if not cleaned:
+                continue
+
+            cleaned = re.sub(r'^\d+\)\s*', '', cleaned)
+            match = re.match(r'^(.+?)\s*[-—]\s*@?([A-Za-z0-9_]+)\s*$', cleaned)
+            if not match:
+                continue
+
+            team_name = match.group(1).strip()
+            username = match.group(2).strip().lstrip('@')
+            if not team_name or not username:
+                continue
+
+            mappings.append({
+                'team_name_raw': team_name,
+                'team_name_norm': self.normalize_team_name(team_name),
+                'telegram_username': username,
+            })
+
+        unique = {}
+        for item in mappings:
+            unique[item['team_name_norm']] = item
+        return list(unique.values())
+
+    def parse_initial_state(self, html_text: str) -> Optional[Dict]:
+        marker = 'window.__INITIAL_STATE__='
+        start = html_text.find(marker)
+        if start == -1:
+            return None
+        end = html_text.find('</script>', start)
+        if end == -1:
+            return None
+
+        raw_json = html_text[start + len(marker):end].strip()
+        if raw_json.endswith(';'):
+            raw_json = raw_json[:-1]
+
+        try:
+            return json.loads(raw_json)
+        except Exception as e:
+            logger.error(f"Failed to parse Challenge initial state: {e}")
+            return None
+
+    def fetch_text_url(self, url: str, timeout: int = 30) -> str:
+        request = urllib.request.Request(url, headers={
+            'User-Agent': 'Mozilla/5.0 (compatible; FCMobileBot/1.0)'
+        })
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = response.read()
+            return data.decode('utf-8', errors='ignore')
+
+    def _object_id_add(self, object_id: str, delta: int) -> str:
+        return f"{int(object_id, 16) + delta:024x}"
+
+    def _build_debt_line(self, debtor: Dict, opponent: Dict) -> str:
+        return (
+            f"@{debtor['username']} ({debtor['team_name']}) — "
+            f"@{opponent['username']} ({opponent['team_name']})"
+        )
+
+    def format_league_debts_post(self, chat_id: int) -> str:
+        by_round = self.db.get_league_debts_by_round(chat_id)
+        if not by_round:
+            return "Общие долги:\n\nНет долгов."
+
+        round_items = []
+        for label, entries in by_round.items():
+            round_match = re.search(r'(\d+)', label)
+            order = int(round_match.group(1)) if round_match else 10**9
+            round_items.append((order, label, entries))
+
+        round_items.sort(key=lambda x: x[0])
+        lines = ["Общие долги:", ""]
+
+        for _, label, entries in round_items:
+            lines.append(f"{label}:")
+            for item in entries:
+                lines.append(item['raw_line'])
+            lines.append("")
+
+        return "\n".join(lines).strip()
+
+    def format_league_debts_round(self, chat_id: int, round_num: int) -> str:
+        target_label = f"{round_num} тур"
+        by_round = self.db.get_league_debts_by_round(chat_id)
+        entries = by_round.get(target_label, [])
+
+        lines = [f"{target_label}:"]
+        if not entries:
+            lines.append("Нет долгов.")
+        else:
+            for item in entries:
+                lines.append(item['raw_line'])
+        return "\n".join(lines)
+
+    def sync_challenge_stage_debts(self, chat_id: int, stage_url: str, max_round: int) -> Dict:
+        html_text = self.fetch_text_url(stage_url)
+        state = self.parse_initial_state(html_text)
+        if not state:
+            raise ValueError("Не удалось прочитать данные stage (INITIAL_STATE).")
+
+        rooms = state.get('rooms', {})
+        stage_room = None
+        for room in rooms.values():
+            if isinstance(room, dict) and 'rounds' in room and 'competitors' in room and 'groups' in room:
+                stage_room = room
+                break
+
+        if not stage_room:
+            raise ValueError("Не найдена структура stage в данных страницы.")
+
+        rounds_map = stage_room.get('rounds', {})
+        competitors_map = stage_room.get('competitors', {})
+        team_map_items = self.db.get_league_team_map(chat_id)
+        team_to_user = {item['team_name_norm']: item['telegram_username'] for item in team_map_items}
+
+        debt_entries = []
+        unresolved = set()
+        unresolved_matches = 0
+
+        sorted_rounds = sorted(
+            rounds_map.values(),
+            key=lambda x: x.get('order', 10**9)
+        )
+
+        for round_item in sorted_rounds:
+            order = round_item.get('order')
+            if not isinstance(order, int) or order > max_round:
+                continue
+
+            for series_id in round_item.get('seriesIds', []):
+                match_id = self._object_id_add(series_id, 1)
+                match_url = re.sub(r'/stage/.*$', f'/match/{match_id}', stage_url)
+
+                try:
+                    match_html = self.fetch_text_url(match_url)
+                    match_state = self.parse_initial_state(match_html)
+                    if not match_state:
+                        continue
+
+                    match_rooms = match_state.get('rooms', {})
+                    match_room = None
+                    for room in match_rooms.values():
+                        if isinstance(room, dict) and 'homeCompetitorId' in room and 'awayCompetitorId' in room:
+                            match_room = room
+                            break
+                    if not match_room:
+                        continue
+
+                    round_name = match_room.get('roundName')
+                    round_num_match = re.search(r'(\d+)', round_name or '')
+                    if not round_num_match:
+                        continue
+
+                    round_num = int(round_num_match.group(1))
+                    if round_num > max_round:
+                        continue
+
+                    if match_room.get('winnerSlot') is not None:
+                        continue
+
+                    home_id = match_room.get('homeCompetitorId')
+                    away_id = match_room.get('awayCompetitorId')
+                    home_team = (match_room.get('competitors', {}).get(home_id) or competitors_map.get(home_id) or {}).get('name')
+                    away_team = (match_room.get('competitors', {}).get(away_id) or competitors_map.get(away_id) or {}).get('name')
+
+                    if not home_team or not away_team:
+                        continue
+
+                    home_norm = self.normalize_team_name(home_team)
+                    away_norm = self.normalize_team_name(away_team)
+                    home_user = team_to_user.get(home_norm)
+                    away_user = team_to_user.get(away_norm)
+
+                    unresolved_matches += 1
+                    if not home_user:
+                        unresolved.add(home_team)
+                    if not away_user:
+                        unresolved.add(away_team)
+
+                    if not home_user or not away_user:
+                        continue
+
+                    round_label = f"{round_num} тур"
+                    debt_entries.append({
+                        'round_label': round_label,
+                        'debtor_username': home_user,
+                        'opponent_username': away_user,
+                        'raw_line': self._build_debt_line(
+                            {'username': home_user, 'team_name': home_team},
+                            {'username': away_user, 'team_name': away_team},
+                        ),
+                    })
+                    debt_entries.append({
+                        'round_label': round_label,
+                        'debtor_username': away_user,
+                        'opponent_username': home_user,
+                        'raw_line': self._build_debt_line(
+                            {'username': away_user, 'team_name': away_team},
+                            {'username': home_user, 'team_name': home_team},
+                        ),
+                    })
+                except Exception as e:
+                    logger.warning(f"Failed to process match {match_id}: {e}")
+                    continue
+
+        self.db.replace_league_debts(chat_id, debt_entries)
+        self.db.set_league_challenge_source(chat_id, stage_url, max_round)
+
+        return {
+            'entries_count': len(debt_entries),
+            'unresolved_teams': sorted(unresolved),
+            'unresolved_matches': unresolved_matches,
+            'max_round': max_round,
+        }
 
     def build_league_summary_text(self, chat_id: int, threshold: int = 2) -> str:
         summary = self.db.get_league_debt_summary(chat_id)
@@ -1918,6 +2280,166 @@ class TournamentBot:
         chat_id = update.effective_chat.id
         self.db.clear_league_debts(chat_id)
         await update.message.reply_text("✅ Долги лиги очищены.")
+
+    async def cmd_league_debts_post(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        chat_id = update.effective_chat.id
+        await update.message.reply_text(self.format_league_debts_post(chat_id))
+
+    async def cmd_league_debts_round(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        if not context.args:
+            await update.message.reply_text("Использование: /league_debts_round [номер тура]")
+            return
+
+        try:
+            round_num = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("Номер тура должен быть числом.")
+            return
+
+        chat_id = update.effective_chat.id
+        await update.message.reply_text(self.format_league_debts_round(chat_id, round_num))
+
+    async def cmd_league_map_bulk(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        payload = ""
+        if update.message and update.message.text:
+            parts = update.message.text.split(maxsplit=1)
+            if len(parts) > 1:
+                payload = parts[1].strip()
+
+        if not payload:
+            await update.message.reply_text(
+                "Использование: /league_map_bulk [список]\n"
+                "Пример: Спортинг - @Saneek41pon"
+            )
+            return
+
+        mappings = self.parse_league_map_bulk_text(payload)
+        if not mappings:
+            await update.message.reply_text(
+                "Не удалось распознать ни одной строки. Используйте формат: Команда - @username"
+            )
+            return
+
+        chat_id = update.effective_chat.id
+        self.db.replace_league_team_map(chat_id, mappings)
+        await update.message.reply_text(f"✅ Обновил привязки клубов: {len(mappings)}")
+
+    async def cmd_league_map_show(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        chat_id = update.effective_chat.id
+        items = self.db.get_league_team_map(chat_id)
+        if not items:
+            await update.message.reply_text("Привязки клубов пустые.")
+            return
+
+        lines = ["📌 Привязки клубов:", ""]
+        for idx, item in enumerate(items, start=1):
+            lines.append(f"{idx}) {item['team_name_raw']} - @{item['telegram_username']}")
+        await update.message.reply_text("\n".join(lines))
+
+    async def cmd_league_map_clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        chat_id = update.effective_chat.id
+        self.db.clear_league_team_map(chat_id)
+        await update.message.reply_text("✅ Привязки клубов очищены.")
+
+    async def cmd_league_sync_challenge(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        if len(context.args) < 2:
+            await update.message.reply_text(
+                "Использование: /league_sync_challenge <stage_url> <max_round>"
+            )
+            return
+
+        stage_url = context.args[0].strip()
+        try:
+            max_round = int(context.args[1])
+        except ValueError:
+            await update.message.reply_text("max_round должен быть числом.")
+            return
+
+        chat_id = update.effective_chat.id
+        try:
+            result = self.sync_challenge_stage_debts(chat_id, stage_url, max_round)
+            debts_post = self.format_league_debts_post(chat_id)
+            await update.message.reply_text(
+                f"✅ Синк выполнен до {max_round} тура включительно.\n"
+                f"Записей долгов: {result['entries_count']}\n"
+                f"Неразобранных матчей: {result['unresolved_matches']}"
+            )
+
+            if result['unresolved_teams']:
+                unresolved_text = "\n".join([f"- {team}" for team in result['unresolved_teams']])
+                await update.message.reply_text(
+                    "⚠️ Команды без привязки к @username:\n" + unresolved_text
+                )
+
+            await update.message.reply_text(debts_post)
+        except Exception as e:
+            logger.error(f"League sync failed: {e}")
+            await update.message.reply_text(f"❌ Ошибка синка: {e}")
+
+    async def cmd_league_sync_now(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        chat_id = update.effective_chat.id
+        source = self.db.get_league_challenge_source(chat_id)
+        if not source or not source.get('enabled'):
+            await update.message.reply_text(
+                "Источник не настроен. Используйте /league_sync_challenge <stage_url> <max_round>."
+            )
+            return
+
+        max_round = source.get('max_round', 0)
+        if context.args:
+            try:
+                max_round = int(context.args[0])
+            except ValueError:
+                await update.message.reply_text("max_round должен быть числом.")
+                return
+
+        try:
+            result = self.sync_challenge_stage_debts(chat_id, source['stage_url'], max_round)
+            await update.message.reply_text(
+                f"✅ Повторный синк выполнен до {max_round} тура включительно.\n"
+                f"Записей долгов: {result['entries_count']}"
+            )
+            await update.message.reply_text(self.format_league_debts_post(chat_id))
+        except Exception as e:
+            logger.error(f"League resync failed: {e}")
+            await update.message.reply_text(f"❌ Ошибка синка: {e}")
+
+    async def cmd_league_sync_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        chat_id = update.effective_chat.id
+        self.db.disable_league_challenge_source(chat_id)
+        await update.message.reply_text("✅ Источник синка Challenge отключен.")
 
     async def cmd_league_reminder_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):

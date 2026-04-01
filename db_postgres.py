@@ -228,6 +228,28 @@ class Database:
                 UNIQUE(chat_id, slot_key)
             )
         ''')
+
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS league_team_map (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                team_name_norm TEXT NOT NULL,
+                team_name_raw TEXT NOT NULL,
+                telegram_username TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(chat_id, team_name_norm)
+            )
+        ''')
+
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS league_challenge_sources (
+                chat_id BIGINT PRIMARY KEY,
+                stage_url TEXT NOT NULL,
+                max_round INTEGER NOT NULL,
+                enabled INTEGER DEFAULT 1,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         
         self.cursor.execute('''
             DO $$ BEGIN
@@ -478,6 +500,81 @@ class Database:
         ''', (chat_id, slot_key))
         self.conn.commit()
         return self.cursor.rowcount > 0
+
+    def replace_league_team_map(self, chat_id: int, mappings: List[Dict]):
+        self.cursor.execute('DELETE FROM league_team_map WHERE chat_id = %s', (chat_id,))
+
+        for item in mappings:
+            self.cursor.execute('''
+                INSERT INTO league_team_map (chat_id, team_name_norm, team_name_raw, telegram_username)
+                VALUES (%s, %s, %s, %s)
+            ''', (
+                chat_id,
+                item['team_name_norm'],
+                item['team_name_raw'],
+                item['telegram_username'],
+            ))
+
+        self.conn.commit()
+
+    def clear_league_team_map(self, chat_id: int):
+        self.cursor.execute('DELETE FROM league_team_map WHERE chat_id = %s', (chat_id,))
+        self.conn.commit()
+
+    def get_league_team_map(self, chat_id: int) -> List[Dict]:
+        self.cursor.execute('''
+            SELECT team_name_norm, team_name_raw, telegram_username
+            FROM league_team_map
+            WHERE chat_id = %s
+            ORDER BY team_name_raw ASC
+        ''', (chat_id,))
+        return [dict(row) for row in self.cursor.fetchall()]
+
+    def set_league_challenge_source(self, chat_id: int, stage_url: str, max_round: int):
+        self.cursor.execute('''
+            INSERT INTO league_challenge_sources (chat_id, stage_url, max_round, enabled, updated_at)
+            VALUES (%s, %s, %s, 1, CURRENT_TIMESTAMP)
+            ON CONFLICT (chat_id) DO UPDATE SET
+                stage_url = EXCLUDED.stage_url,
+                max_round = EXCLUDED.max_round,
+                enabled = 1,
+                updated_at = CURRENT_TIMESTAMP
+        ''', (chat_id, stage_url, max_round))
+        self.conn.commit()
+
+    def get_league_challenge_source(self, chat_id: int) -> Optional[Dict]:
+        self.cursor.execute('''
+            SELECT chat_id, stage_url, max_round, enabled
+            FROM league_challenge_sources
+            WHERE chat_id = %s
+        ''', (chat_id,))
+        row = self.cursor.fetchone()
+        return dict(row) if row else None
+
+    def disable_league_challenge_source(self, chat_id: int):
+        self.cursor.execute('''
+            UPDATE league_challenge_sources
+            SET enabled = 0, updated_at = CURRENT_TIMESTAMP
+            WHERE chat_id = %s
+        ''', (chat_id,))
+        self.conn.commit()
+
+    def get_league_debts_by_round(self, chat_id: int) -> Dict[str, List[Dict]]:
+        self.cursor.execute('''
+            SELECT round_label, debtor_username, opponent_username, raw_line
+            FROM league_debt_entries
+            WHERE chat_id = %s
+            ORDER BY id ASC
+        ''', (chat_id,))
+        result = {}
+        for row in self.cursor.fetchall():
+            round_label = row['round_label'] or 'Без тура'
+            result.setdefault(round_label, []).append({
+                'debtor_username': row['debtor_username'],
+                'opponent_username': row['opponent_username'],
+                'raw_line': row['raw_line'],
+            })
+        return result
     
     def delete_tournament_matches(self, tournament_id: int):
         self.cursor.execute('DELETE FROM matches WHERE tournament_id = %s', (tournament_id,))
