@@ -1897,7 +1897,7 @@ class TournamentBot:
             "/tinfo [ID] - информация по турниру\n"
             "/finalpost [ID] - отправить финальный пост\n"
             "/dbstats - статистика базы\n"
-            "/ai [вопрос] - AI ассистент админа\n"
+            "/ai [вопрос] - общий AI ассистент\n"
             "/aihealth - диагностика AI"
         )
         await update.message.reply_text(text)
@@ -3046,6 +3046,21 @@ class TournamentBot:
 
         return "\n".join(lines)
 
+    def build_ai_general_fallback_response(self, question: str) -> str:
+        lines = [
+            "⚠️ ИИ временно недоступен.",
+            "",
+            "Что можно сделать сейчас:",
+            "1) Сформулируй вопрос короче и конкретнее.",
+            "2) Добавь контекст: цель, ограничения, желаемый результат.",
+            "3) Повтори запрос через 10-20 секунд.",
+        ]
+
+        if question:
+            lines.extend(["", f"Ваш вопрос: {question}"])
+
+        return "\n".join(lines)
+
     async def cmd_ai(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
             await update.message.reply_text("❌ Команда доступна только админам.")
@@ -3068,24 +3083,24 @@ class TournamentBot:
             return
 
         tournament = self.db.get_tournament_by_chat(chat_id)
-        if not tournament:
-            await update.message.reply_text("Нет активного турнира в этом чате.")
-            return
 
         user_question = " ".join(context.args).strip()
         if len(user_question) > 600:
             user_question = user_question[:600]
 
-        tournament_context = self.build_ai_tournament_context(tournament)
         system_prompt = (
-            "Ты ассистент администратора турниров FC Mobile. "
+            "Ты ассистент администратора FC Mobile. "
             "Отвечай только на русском, кратко и по делу. "
             "Дай конкретные шаги/рекомендации, если уместно."
         )
-        user_prompt = (
-            f"Контекст турнира:\n{tournament_context}\n\n"
-            f"Вопрос администратора: {user_question}"
-        )
+        if tournament:
+            tournament_context = self.build_ai_tournament_context(tournament)
+            user_prompt = (
+                f"Контекст турнира:\n{tournament_context}\n\n"
+                f"Вопрос администратора: {user_question}"
+            )
+        else:
+            user_prompt = f"Вопрос администратора: {user_question}"
 
         try:
             await update.message.reply_text("🤖 Анализирую...")
@@ -3102,7 +3117,10 @@ class TournamentBot:
             await update.message.reply_text(answer_with_meta[:3800])
         except Exception as e:
             logger.error(f"AI command error: {e}")
-            fallback_text = self.build_ai_fallback_response(tournament, user_question)
+            if tournament:
+                fallback_text = self.build_ai_fallback_response(tournament, user_question)
+            else:
+                fallback_text = self.build_ai_general_fallback_response(user_question)
             await update.message.reply_text(fallback_text[:3200])
             await update.message.reply_text(f"🔎 Диагностика AI: {str(e)[:700]}")
 
