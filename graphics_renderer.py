@@ -1,4 +1,5 @@
 import os
+import unicodedata
 from datetime import datetime
 from typing import Dict, List, Tuple
 
@@ -9,6 +10,7 @@ class GraphicsRenderer:
     def __init__(self, output_dir: str = "tmp/graphics"):
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
+        self._font_cache = {}
 
     def _palette(self, theme: str) -> Dict[str, Tuple[int, int, int]]:
         if theme == "bright":
@@ -32,13 +34,63 @@ class GraphicsRenderer:
         }
 
     def _font(self, size: int) -> ImageFont.FreeTypeFont:
-        candidates = ["arial.ttf", "DejaVuSans.ttf", "seguiemj.ttf"]
+        if size in self._font_cache:
+            return self._font_cache[size]
+
+        candidates = [
+            "DejaVuSans.ttf",
+            "NotoSans-Regular.ttf",
+            "LiberationSans-Regular.ttf",
+            "arial.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+            "C:/Windows/Fonts/segoeui.ttf",
+        ]
         for name in candidates:
             try:
-                return ImageFont.truetype(name, size)
+                font = ImageFont.truetype(name, size)
+                self._font_cache[size] = font
+                return font
             except Exception:
                 continue
-        return ImageFont.load_default()
+
+        fallback = ImageFont.load_default()
+        self._font_cache[size] = fallback
+        return fallback
+
+    def _clean_text(self, value: str) -> str:
+        if value is None:
+            return ""
+        text = unicodedata.normalize("NFKC", str(value))
+        text = text.replace("\ufe0f", "")
+        return "".join(ch for ch in text if unicodedata.category(ch) != "Cc")
+
+    def _fit_text(self, draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> str:
+        text = self._clean_text(text)
+        if draw.textlength(text, font=font) <= max_width:
+            return text
+
+        ellipsis = "..."
+        if draw.textlength(ellipsis, font=font) > max_width:
+            return ""
+
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            candidate = text[:mid] + ellipsis
+            if draw.textlength(candidate, font=font) <= max_width:
+                lo = mid
+            else:
+                hi = mid - 1
+        return text[:lo] + ellipsis
+
+    def _draw_right(self, draw: ImageDraw.ImageDraw, right_x: int, y: int, text: str, font: ImageFont.FreeTypeFont, fill):
+        value = self._clean_text(text)
+        w = draw.textlength(value, font=font)
+        draw.text((right_x - w, y), value, fill=fill, font=font)
 
     def _output_path(self, prefix: str) -> str:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -64,7 +116,7 @@ class GraphicsRenderer:
         draw = ImageDraw.Draw(image)
 
         draw.text((40, 30), "ГРУППОВОЙ ЭТАП", fill=palette["title"], font=title_font)
-        draw.text((40, 82), tournament_name, fill=palette["muted"], font=small_font)
+        draw.text((40, 82), self._clean_text(tournament_name), fill=palette["muted"], font=small_font)
         draw.line((40, 115, width - 40, 115), fill=palette["line"], width=3)
 
         groups_order = ["A", "B", "C", "D"]
@@ -135,20 +187,28 @@ class GraphicsRenderer:
         draw.line((x + 16, y + 56, x + w - 16, y + 56), fill=palette["line"], width=2)
 
         header_y = y + 70
-        draw.text((x + 18, header_y), "Игрок", fill=palette["muted"], font=small_font)
-        draw.text((x + w - 370, header_y), "И", fill=palette["muted"], font=small_font)
-        draw.text((x + w - 330, header_y), "В", fill=palette["muted"], font=small_font)
-        draw.text((x + w - 290, header_y), "П", fill=palette["muted"], font=small_font)
-        draw.text((x + w - 250, header_y), "Н", fill=palette["muted"], font=small_font)
-        draw.text((x + w - 205, header_y), "Мячи", fill=palette["muted"], font=small_font)
-        draw.text((x + w - 100, header_y), "О", fill=palette["muted"], font=small_font)
+        nick_x = x + 18
+        mp_r = x + w - 350
+        wins_r = x + w - 300
+        losses_r = x + w - 250
+        draws_r = x + w - 200
+        goals_r = x + w - 125
+        points_r = x + w - 50
+
+        draw.text((nick_x, header_y), "Игрок", fill=palette["muted"], font=small_font)
+        self._draw_right(draw, mp_r, header_y, "И", small_font, palette["muted"])
+        self._draw_right(draw, wins_r, header_y, "В", small_font, palette["muted"])
+        self._draw_right(draw, losses_r, header_y, "П", small_font, palette["muted"])
+        self._draw_right(draw, draws_r, header_y, "Н", small_font, palette["muted"])
+        self._draw_right(draw, goals_r, header_y, "Мячи", small_font, palette["muted"])
+        self._draw_right(draw, points_r, header_y, "О", small_font, palette["muted"])
         draw.line((x + 16, header_y + 26, x + w - 16, header_y + 26), fill=palette["line"], width=1)
 
         row_y = header_y + 34
         row_h = 38
 
         for idx, p in enumerate(players[:10], 1):
-            nick = (p.get("ingame_nick") or "?")[:18]
+            raw_nick = p.get("ingame_nick") or "?"
             mp = p.get("matches_played", 0)
             wins = p.get("wins", 0)
             losses = p.get("losses", 0)
@@ -157,16 +217,18 @@ class GraphicsRenderer:
             gc = p.get("goals_conceded", 0)
             points = p.get("points", wins * 3 + draws)
 
+            nick = self._fit_text(draw, f"{idx}. {raw_nick}", body_font, max_width=(mp_r - nick_x - 16))
+
             if idx % 2 == 0:
                 draw.rectangle((x + 12, row_y - 2, x + w - 12, row_y + row_h - 2), fill=(250, 251, 253))
 
-            draw.text((x + 18, row_y), f"{idx}. {nick}", fill=palette["text"], font=body_font)
-            draw.text((x + w - 370, row_y), str(mp), fill=palette["text"], font=body_font)
-            draw.text((x + w - 330, row_y), str(wins), fill=palette["text"], font=body_font)
-            draw.text((x + w - 290, row_y), str(losses), fill=palette["text"], font=body_font)
-            draw.text((x + w - 250, row_y), str(draws), fill=palette["text"], font=body_font)
-            draw.text((x + w - 205, row_y), f"{gs}:{gc}", fill=palette["text"], font=body_font)
-            draw.text((x + w - 100, row_y), str(points), fill=palette["accent"], font=body_font)
+            draw.text((nick_x, row_y), nick, fill=palette["text"], font=body_font)
+            self._draw_right(draw, mp_r, row_y, str(mp), body_font, palette["text"])
+            self._draw_right(draw, wins_r, row_y, str(wins), body_font, palette["text"])
+            self._draw_right(draw, losses_r, row_y, str(losses), body_font, palette["text"])
+            self._draw_right(draw, draws_r, row_y, str(draws), body_font, palette["text"])
+            self._draw_right(draw, goals_r, row_y, f"{gs}:{gc}", body_font, palette["text"])
+            self._draw_right(draw, points_r, row_y, str(points), body_font, palette["accent"])
 
             row_y += row_h
 
@@ -190,7 +252,7 @@ class GraphicsRenderer:
         draw = ImageDraw.Draw(image)
 
         draw.text((40, 30), "ПЛЕЙ-ОФФ", fill=palette["title"], font=title_font)
-        draw.text((40, 82), tournament_name, fill=palette["muted"], font=small_font)
+        draw.text((40, 82), self._clean_text(tournament_name), fill=palette["muted"], font=small_font)
         draw.line((40, 115, width - 40, 115), fill=palette["line"], width=3)
 
         if orientation == "vertical":
@@ -237,8 +299,8 @@ class GraphicsRenderer:
 
         row_y = y + 82
         for m in matches:
-            p1 = (m.get("player1_nick") or "?")[:12]
-            p2 = (m.get("player2_nick") or "?")[:12]
+            p1 = self._fit_text(draw, m.get("player1_nick") or "?", body_font, max_width=130)
+            p2 = self._fit_text(draw, m.get("player2_nick") or "?", body_font, max_width=130)
             w1 = m.get("player1_wins", 0)
             w2 = m.get("player2_wins", 0)
             status = m.get("status", "pending")
