@@ -875,6 +875,8 @@ class TournamentBot:
         self.admin_notifications = {}
         self.cooldowns = {}
         self.ai_cooldowns = {}
+        self.media_groups_buffer = {}
+        self.media_groups_tasks = {}
         self.setup_handlers()
     
     def setup_handlers(self):
@@ -1527,37 +1529,130 @@ class TournamentBot:
         )
     
     async def handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        msg = update.message
+        if not msg or not msg.photo:
+            return
+
+        photo = msg.photo[-1]
+        media_group_id = msg.media_group_id
+
+        if media_group_id:
+            key = (update.effective_chat.id, msg.message_thread_id or 0, update.effective_user.id, media_group_id)
+            payload = self.media_groups_buffer.get(key)
+            if payload is None:
+                payload = {
+                    "chat_id": update.effective_chat.id,
+                    "thread_id": msg.message_thread_id,
+                    "user_id": update.effective_user.id,
+                    "photos": [],
+                    "caption": "",
+                }
+                self.media_groups_buffer[key] = payload
+
+            payload["photos"].append(photo)
+            if msg.caption and not payload["caption"]:
+                payload["caption"] = msg.caption
+
+            existing_task = self.media_groups_tasks.get(key)
+            if existing_task and not existing_task.done():
+                existing_task.cancel()
+
+            self.media_groups_tasks[key] = asyncio.create_task(self._flush_media_group(key, context))
+            return
+
+        await self._process_photos_batch(
+            context=context,
+            chat_id=update.effective_chat.id,
+            thread_id=msg.message_thread_id,
+            user_id=update.effective_user.id,
+            photos=[photo],
+            caption=msg.caption or "",
+            reply_message=msg,
+        )
+
+    async def _flush_media_group(self, key, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            await asyncio.sleep(1.2)
+            payload = self.media_groups_buffer.pop(key, None)
+            self.media_groups_tasks.pop(key, None)
+            if not payload:
+                return
+
+            await self._process_photos_batch(
+                context=context,
+                chat_id=payload["chat_id"],
+                thread_id=payload["thread_id"],
+                user_id=payload["user_id"],
+                photos=payload["photos"],
+                caption=payload["caption"],
+            )
+        except asyncio.CancelledError:
+            return
+
+    async def _send_results_reply(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, thread_id: int, text: str, reply_message=None):
+        if reply_message is not None:
+            await reply_message.reply_text(text)
+            return
+
+        kwargs = {"chat_id": chat_id, "text": text}
+        if thread_id:
+            kwargs["message_thread_id"] = thread_id
+        await context.bot.send_message(**kwargs)
+
+    async def _process_photos_batch(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        chat_id: int,
+        thread_id: int,
+        user_id: int,
+        photos,
+        caption: str,
+        reply_message=None,
+    ):
         import time
-        user_id = update.effective_user.id
+
         player = self.db.get_player(user_id)
-        
         if not player:
             return
-        
-        tournament = self.db.get_tournament_by_chat(update.effective_chat.id)
+
+        tournament = self.db.get_tournament_by_chat(chat_id)
         if not tournament:
             return
-        
+
         results_topic_id = tournament.get('results_topic_id')
-        if results_topic_id and update.message.message_thread_id != results_topic_id:
-            await update.message.reply_text("❌ Результаты принимаются только в топике результатов.")
+        if results_topic_id and thread_id != results_topic_id:
+            await self._send_results_reply(
+                context,
+                chat_id,
+                thread_id,
+                "❌ Результаты принимаются только в топике результатов.",
+                reply_message=reply_message,
+            )
             return
-        
+
         current_time = time.time()
         if user_id in self.cooldowns:
             last_submission = self.cooldowns[user_id]
             if current_time - last_submission < 180:
                 remaining = int(180 - (current_time - last_submission))
-                await update.message.reply_text(
-                    f"⏳ Подожди {remaining} сек. перед следующей отправкой результата."
+                await self._send_results_reply(
+                    context,
+                    chat_id,
+                    thread_id,
+                    f"⏳ Подожди {remaining} сек. перед следующей отправкой результата.",
+                    reply_message=reply_message,
                 )
                 return
-        
-        photos = update.message.photo
-        
+
         pending_matches = self.db.get_player_matches(user_id, tournament['id'], 'pending')
         if not pending_matches:
-            await update.message.reply_text("❌ У тебя нет ожидающих матчей для отправки результата.")
+            await self._send_results_reply(
+                context,
+                chat_id,
+                thread_id,
+                "❌ У тебя нет ожидающих матчей для отправки результата.",
+                reply_message=reply_message,
+            )
             return
 
         pending_by_id = {}
@@ -1573,7 +1668,6 @@ class TournamentBot:
                 p2['user_id']: (p2.get('ingame_nick') or '').lower(),
             }
 
-        caption = update.message.caption or ""
         caption_match = None
         if caption:
             nick_match = re.match(r'@?(\S+)\s*[-–]\s*@?(\S+)', caption)
@@ -1586,7 +1680,7 @@ class TournamentBot:
                     cmatch = self.db.find_match_between_players(tournament['id'], cp1['user_id'], cp2['user_id'])
                     if cmatch:
                         caption_match = (cmatch, cp1, cp2)
-        
+
         results = []
         unrecognized = []
         unresolved_nicks = []
@@ -1595,13 +1689,13 @@ class TournamentBot:
             if not a or not b:
                 return 0.0
             return SequenceMatcher(None, a, b).ratio()
-        
-        for i, photo in enumerate(photos):
+
+        for i, photo in enumerate(photos, start=1):
             try:
                 photo_file = await context.bot.get_file(photo.file_id)
                 photo_path = f"screenshots/match_{photo.file_id}.jpg"
                 await photo_file.download_to_drive(photo_path)
-                
+
                 screenshot_text = self.screenshot_analyzer.extract_text(photo_path)
                 score1, score2 = self.screenshot_analyzer.extract_scores(screenshot_text)
                 nick_tokens = self.screenshot_analyzer.extract_nick_tokens(screenshot_text)
@@ -1643,65 +1737,68 @@ class TournamentBot:
                         match, p1, p2 = caption_match
                         detected_order = (p1['user_id'], p2['user_id'])
                     else:
-                        unresolved_nicks.append(i + 1)
+                        unresolved_nicks.append(i)
                         continue
                 else:
                     match, p1, p2 = pending_by_id[best_match_id]
-                
-                if score1 is not None and score2 is not None:
-                    first_user_id, second_user_id = detected_order
-                    score_by_user = {
-                        first_user_id: score1,
-                        second_user_id: score2,
-                    }
-                    p1_score = score_by_user.get(p1['user_id'])
-                    p2_score = score_by_user.get(p2['user_id'])
 
-                    if p1_score is None or p2_score is None:
-                        unresolved_nicks.append(i + 1)
-                        continue
+                if score1 is None or score2 is None:
+                    unrecognized.append(i)
+                    continue
 
-                    if p1_score > p2_score:
-                        winner_id = p1['user_id']
-                    elif p2_score > p1_score:
-                        winner_id = p2['user_id']
-                    else:
-                        winner_id = None
-                    
-                    await self.process_match_result(match, p1_score, p2_score, winner_id, user_id, photo.file_id)
-                    
-                    results.append(f"📸 {p1['ingame_nick']} {p1_score}:{p2_score} {p2['ingame_nick']}")
+                first_user_id, second_user_id = detected_order
+                score_by_user = {
+                    first_user_id: score1,
+                    second_user_id: score2,
+                }
+                p1_score = score_by_user.get(p1['user_id'])
+                p2_score = score_by_user.get(p2['user_id'])
+
+                if p1_score is None or p2_score is None:
+                    unresolved_nicks.append(i)
+                    continue
+
+                if p1_score > p2_score:
+                    winner_id = p1['user_id']
+                elif p2_score > p1_score:
+                    winner_id = p2['user_id']
                 else:
-                    unrecognized.append(i + 1)
+                    winner_id = None
+
+                await self.process_match_result(match, p1_score, p2_score, winner_id, user_id, photo.file_id)
+                results.append(f"📸 {p1['ingame_nick']} {p1_score}:{p2_score} {p2['ingame_nick']}")
             except Exception as e:
                 logger.error(f"Error processing photo {photo.file_id}: {e}")
-                unrecognized.append(i + 1)
-        
+                unrecognized.append(i)
+
+        total = len(photos)
         if results:
             self.cooldowns[user_id] = current_time
-            text = f"✅ Результаты ({len(results)}/{len(photos)}):\n"
+            text = f"✅ Результаты ({len(results)}/{total}):\n"
             text += "\n".join(results)
             if unresolved_nicks:
                 text += (
-                    f"\n\n❌ Не удалось распознать ники ({len(unresolved_nicks)}/{len(photos)}): "
+                    f"\n\n❌ Не удалось распознать ники ({len(unresolved_nicks)}/{total}): "
                     f"скриншот {', '.join(map(str, unresolved_nicks))}"
                 )
                 text += "\nНапиши ники в формате: player1 - player2"
             if unrecognized:
-                text += f"\n\n❌ Не распознано ({len(unrecognized)}/{len(photos)}): скриншот {', '.join(map(str, unrecognized))}"
+                text += f"\n\n❌ Не распознано ({len(unrecognized)}/{total}): скриншот {', '.join(map(str, unrecognized))}"
                 text += "\nИспользуйте /gresult для ввода оставшихся результатов."
-            await update.message.reply_text(text)
+            await self._send_results_reply(context, chat_id, thread_id, text, reply_message=reply_message)
+            return
+
+        if unresolved_nicks and not unrecognized:
+            text = (
+                "❌ Не удалось распознать ники игроков на скриншотах.\n"
+                "Напиши ники в формате: player1 - player2"
+            )
         else:
-            if unresolved_nicks and not unrecognized:
-                await update.message.reply_text(
-                    "❌ Не удалось распознать ники игроков на скриншотах.\n"
-                    "Напиши ники в формате: player1 - player2"
-                )
-            else:
-                await update.message.reply_text(
-                    "❌ Не удалось распознать счёт/ники на скриншотах.\n"
-                    "Напиши ники в формате: player1 - player2 или используй /gresult."
-                )
+            text = (
+                "❌ Не удалось распознать счёт/ники на скриншотах.\n"
+                "Напиши ники в формате: player1 - player2 или используй /gresult."
+            )
+        await self._send_results_reply(context, chat_id, thread_id, text, reply_message=reply_message)
     
     async def process_match_result(self, match: Dict, score1: int, score2: int,
                                   winner_id: int, reported_by: int, screenshot_id: str = None):
