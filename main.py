@@ -1014,9 +1014,12 @@ class TournamentBot:
     async def handle_error(self, update: object, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Unhandled exception while processing update", exc_info=context.error)
 
-    async def notify_admin(self, chat_id: int, message: str):
+    async def notify_admin(self, chat_id: int, message: str, message_thread_id: Optional[int] = None):
         try:
-            await self.application.bot.send_message(chat_id=chat_id, text=message)
+            kwargs = {"chat_id": chat_id, "text": message}
+            if message_thread_id:
+                kwargs["message_thread_id"] = message_thread_id
+            await self.application.bot.send_message(**kwargs)
         except Exception as e:
             logger.error(f"Failed to send admin notification: {e}")
     
@@ -2128,7 +2131,11 @@ class TournamentBot:
         tournament = self.db.get_tournament(match['tournament_id'])
         if tournament:
             if send_notification:
-                await self.notify_admin(tournament['chat_id'], notification)
+                await self.notify_admin(
+                    tournament['chat_id'],
+                    notification,
+                    tournament.get('results_topic_id'),
+                )
 
             if match.get('group_name'):
                 groups_message_id = tournament.get('groups_message_id')
