@@ -954,6 +954,7 @@ class TournamentBot:
         self.application.add_handler(CommandHandler("notifyall", self.cmd_notify_all))
         self.application.add_handler(CommandHandler("gresult", self.cmd_gresult))
         self.application.add_handler(CommandHandler("refreshreg", self.cmd_refresh_reg))
+        self.application.add_handler(CommandHandler("regen_matches", self.cmd_regen_matches))
         self.application.add_handler(CommandHandler("tinfo", self.cmd_tinfo))
         self.application.add_handler(CommandHandler("dbstats", self.cmd_dbstats))
         self.application.add_handler(CommandHandler("finalpost", self.cmd_finalpost))
@@ -1858,6 +1859,9 @@ class TournamentBot:
                             return pmatch, pp1, pp2
                         if a == uid2 and b == uid1:
                             return pmatch, pp2, pp1
+                    # Пара распознана однозначно, но подходящий матч не найден.
+                    # Не подбираем другой матч по fuzzy, чтобы не записывать неверного соперника.
+                    return None
 
             if left_norm and right_norm:
                 best_candidate = None
@@ -1997,16 +2001,12 @@ class TournamentBot:
             await self._send_results_reply(context, chat_id, output_thread_id, text)
             return
 
-        score_counter = {}
-        for _, s1, s2, _ in recognized_scores:
-            key = (s1, s2)
-            score_counter[key] = score_counter.get(key, 0) + 1
-        (best_s1, best_s2), _ = max(score_counter.items(), key=lambda item: item[1])
-
-        chosen_file_id = next(fid for _, s1, s2, fid in recognized_scores if s1 == best_s1 and s2 == best_s2)
+        total_s1 = sum(s1 for _, s1, _, _ in recognized_scores)
+        total_s2 = sum(s2 for _, _, s2, _ in recognized_scores)
+        chosen_file_id = recognized_scores[0][3]
         score_by_user = {
-            cp1['user_id']: best_s1,
-            cp2['user_id']: best_s2,
+            cp1['user_id']: total_s1,
+            cp2['user_id']: total_s2,
         }
         p1_score = score_by_user.get(match['player1_id'])
         p2_score = score_by_user.get(match['player2_id'])
@@ -2032,8 +2032,8 @@ class TournamentBot:
 
         p1 = self.db.get_player(match['player1_id'])
         p2 = self.db.get_player(match['player2_id'])
-        text = f"✅ Результат записан: {p1['ingame_nick']} {p1_score}:{p2_score} {p2['ingame_nick']}"
-        text += f"\nСчитано со скринов: {len(recognized_scores)}/{total}"
+        text = f"✅ Результат записан (сумма игр): {p1['ingame_nick']} {p1_score}:{p2_score} {p2['ingame_nick']}"
+        text += f"\nРаспознано скринов: {len(recognized_scores)}/{total}"
         if unrecognized:
             text += f"\n⚠️ Не распознано скринов: {', '.join(map(str, unrecognized))}"
         await self._send_results_reply(context, chat_id, output_thread_id, text)
@@ -2201,6 +2201,82 @@ class TournamentBot:
             
         except ValueError:
             await update.message.reply_text("Неверные параметры.")
+
+    async def cmd_regen_matches(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        tournament = None
+        if context.args:
+            try:
+                tournament = self.db.get_tournament(int(context.args[0]))
+            except Exception:
+                await update.message.reply_text("Использование: /regen_matches [tournament_id]")
+                return
+        else:
+            tournament = self.db.get_tournament_by_chat(update.effective_chat.id)
+
+        if not tournament:
+            await update.message.reply_text("❌ Турнир не найден.")
+            return
+
+        if tournament.get('status') != TournamentStatus.IN_PROGRESS.value:
+            await update.message.reply_text("❌ Турнир должен быть в статусе in_progress.")
+            return
+
+        if tournament.get('format') != 'classical':
+            await update.message.reply_text("❌ Команда поддерживается только для классического формата.")
+            return
+
+        joined = [p for p in tournament.get('players', []) if p.get('tournament_status') == 'joined']
+        if len(joined) < 2:
+            await update.message.reply_text("❌ Недостаточно игроков для генерации матчей.")
+            return
+
+        self.db.delete_tournament_matches(tournament['id'])
+
+        # Если группы уже были назначены — сохраняем их, иначе создаем заново.
+        has_existing_groups = any((p.get('group_name') or '').strip() for p in joined)
+        created_matches = 0
+
+        if not has_existing_groups:
+            self.create_group_stage(tournament, joined)
+            created_matches = len(self.db.get_tournament_matches(tournament['id']))
+        else:
+            groups = {}
+            for p in joined:
+                group_name = (p.get('group_name') or '').strip()
+                if not group_name:
+                    continue
+                groups.setdefault(group_name, []).append(p)
+
+            for group_name, group_players in groups.items():
+                for i, p1 in enumerate(group_players):
+                    for p2 in group_players[i + 1:]:
+                        self.db.create_match(
+                            tournament_id=tournament['id'],
+                            player1_id=p1['user_id'],
+                            player2_id=p2['user_id'],
+                            round_num=1,
+                            group_name=group_name,
+                            match_type='group',
+                            deadline_days=tournament.get('deadline_days', 3)
+                        )
+                        created_matches += 1
+
+        if tournament.get('groups_message_id'):
+            await self.update_groups_table(
+                chat_id=tournament['chat_id'],
+                message_id=tournament['groups_message_id'],
+                tournament_id=tournament['id']
+            )
+
+        await update.message.reply_text(
+            f"✅ Матчи пересозданы.\n"
+            f"Турнир: {tournament['name']} (ID {tournament['id']})\n"
+            f"Сгенерировано матчей: {created_matches}"
+        )
     
     async def send_join_message(self, chat_id: int, tournament_id: int):
         tournament = self.db.get_tournament(tournament_id)
