@@ -758,6 +758,7 @@ class ScreenshotAnalyzer:
         self.ocr_available = False
         self.max_plausible_score = self._load_max_plausible_score()
         self._ocr_lang = "eng+rus"
+        self._tesseract_cmd = None
         try:
             import pytesseract
             from PIL import Image
@@ -766,11 +767,25 @@ class ScreenshotAnalyzer:
 
             env_cmd = os.getenv("TESSERACT_CMD", "").strip()
             if env_cmd:
-                self.pytesseract.pytesseract.tesseract_cmd = env_cmd
-            else:
+                if os.path.isabs(env_cmd):
+                    if os.path.exists(env_cmd):
+                        self._tesseract_cmd = env_cmd
+                    else:
+                        logger.warning("TESSERACT_CMD path does not exist: %s", env_cmd)
+                else:
+                    resolved_env_cmd = shutil.which(env_cmd)
+                    if resolved_env_cmd:
+                        self._tesseract_cmd = resolved_env_cmd
+                    else:
+                        logger.warning("TESSERACT_CMD binary is not found in PATH: %s", env_cmd)
+
+            if not self._tesseract_cmd:
                 detected_cmd = shutil.which("tesseract")
                 if detected_cmd:
-                    self.pytesseract.pytesseract.tesseract_cmd = detected_cmd
+                    self._tesseract_cmd = detected_cmd
+
+            if self._tesseract_cmd:
+                self.pytesseract.pytesseract.tesseract_cmd = self._tesseract_cmd
 
             try:
                 self.pytesseract.get_tesseract_version()
@@ -802,13 +817,19 @@ class ScreenshotAnalyzer:
         if not self.ocr_available:
             return ""
         try:
+            if self._tesseract_cmd:
+                self.pytesseract.pytesseract.tesseract_cmd = self._tesseract_cmd
             image = self.Image.open(photo_path)
             text = self.pytesseract.image_to_string(image, lang=self._ocr_lang)
             return text
         except Exception as e:
             logger.error(f"OCR error: {e}")
+            if "not installed" in str(e) or "No such file or directory" in str(e):
+                self.ocr_available = False
             if self._ocr_lang != "eng":
                 try:
+                    if self._tesseract_cmd:
+                        self.pytesseract.pytesseract.tesseract_cmd = self._tesseract_cmd
                     image = self.Image.open(photo_path)
                     text = self.pytesseract.image_to_string(image, lang="eng")
                     self._ocr_lang = "eng"
