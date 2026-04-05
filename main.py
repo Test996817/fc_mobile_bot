@@ -1038,8 +1038,9 @@ class TournamentBot:
             return
 
         user_id = update.effective_user.id
+        is_admin = self.db.is_admin(user_id)
         player = self.db.get_player(user_id)
-        if not player:
+        if not player and not is_admin:
             return
 
         chat_id = update.effective_chat.id
@@ -1719,8 +1720,9 @@ class TournamentBot:
         screenshots_dir = "screenshots"
         os.makedirs(screenshots_dir, exist_ok=True)
 
+        is_admin = self.db.is_admin(user_id)
         player = self.db.get_player(user_id)
-        if not player:
+        if not player and not is_admin:
             return
 
         tournament = self.db.get_tournament_by_chat(chat_id)
@@ -1739,7 +1741,7 @@ class TournamentBot:
             return
 
         current_time = time.time()
-        if user_id in self.cooldowns:
+        if (not is_admin) and user_id in self.cooldowns:
             last_submission = self.cooldowns[user_id]
             if current_time - last_submission < 180:
                 remaining = int(180 - (current_time - last_submission))
@@ -1751,13 +1753,20 @@ class TournamentBot:
                 )
                 return
 
-        pending_matches = self.db.get_player_matches(user_id, tournament['id'], 'pending')
+        if is_admin:
+            pending_matches = [
+                m for m in self.db.get_tournament_matches(tournament['id'])
+                if m.get('status') == 'pending'
+            ]
+        else:
+            pending_matches = self.db.get_player_matches(user_id, tournament['id'], 'pending')
+
         if not pending_matches:
             await self._send_results_reply(
                 context,
                 chat_id,
                 output_thread_id,
-                "❌ У тебя нет ожидающих матчей для отправки результата.",
+                "❌ Нет ожидающих матчей для отправки результата.",
             )
             return
 
@@ -1862,6 +1871,15 @@ class TournamentBot:
             self.pending_match_hints.pop(hint_key_used, None)
 
         match, cp1, cp2 = caption_match
+
+        if (not is_admin) and user_id not in (match['player1_id'], match['player2_id']):
+            await self._send_results_reply(
+                context,
+                chat_id,
+                output_thread_id,
+                "❌ Этот матч не относится к тебе. Отправь свой матч или используй /gresult.",
+            )
+            return
 
         recognized_scores = []
         unrecognized = []
