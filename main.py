@@ -1782,7 +1782,9 @@ class TournamentBot:
             if not source_text or not pending_users:
                 return None
 
-            first_line = source_text.strip().split('\n')[0]
+            cleaned_text = unicodedata.normalize("NFKC", source_text)
+            cleaned_text = cleaned_text.replace("\u200f", "").replace("\u200e", "")
+            first_line = cleaned_text.strip().split('\n')[0]
             m = re.search(r'(.+?)\s*(?:-|–|—|vs|VS|:){1}\s*(.+)', first_line)
             if not m:
                 return None
@@ -1791,6 +1793,45 @@ class TournamentBot:
             right_raw = m.group(2).replace('@', '').strip()
             left_norm = self.screenshot_analyzer.normalize_nick(left_raw)
             right_norm = self.screenshot_analyzer.normalize_nick(right_raw)
+
+            # 1) Сначала пытаемся точно сопоставить пару по участникам турнира
+            tournament_players = [
+                p for p in (tournament.get('players') or [])
+                if p.get('tournament_status') == 'joined'
+            ]
+
+            def resolve_tournament_user(target_norm: str):
+                if not target_norm:
+                    return None
+                best = None
+                best_score = 0.0
+                for tp in tournament_players:
+                    tp_norm = self.screenshot_analyzer.normalize_nick(tp.get('ingame_nick') or '')
+                    if not tp_norm:
+                        continue
+                    score = SequenceMatcher(None, target_norm, tp_norm).ratio()
+                    if target_norm in tp_norm or tp_norm in target_norm:
+                        score = max(score, 0.96)
+                    if score > best_score:
+                        best_score = score
+                        best = tp
+                if best and best_score >= 0.68:
+                    return best
+                return None
+
+            if left_norm and right_norm:
+                tp1 = resolve_tournament_user(left_norm)
+                tp2 = resolve_tournament_user(right_norm)
+                if tp1 and tp2 and tp1.get('user_id') != tp2.get('user_id'):
+                    uid1 = tp1['user_id']
+                    uid2 = tp2['user_id']
+                    for pmatch, pp1, pp2 in pending_match_rows:
+                        a = pp1.get('user_id')
+                        b = pp2.get('user_id')
+                        if a == uid1 and b == uid2:
+                            return pmatch, pp1, pp2
+                        if a == uid2 and b == uid1:
+                            return pmatch, pp2, pp1
 
             if left_norm and right_norm:
                 best_candidate = None
