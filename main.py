@@ -1755,7 +1755,7 @@ class TournamentBot:
 
         pending_matches = [
             m for m in self.db.get_tournament_matches(tournament['id'])
-            if m.get('status') == 'pending'
+            if m.get('status') in ('pending', 'in_progress')
         ]
 
         if not pending_matches:
@@ -1803,6 +1803,21 @@ class TournamentBot:
             def resolve_tournament_user(target_norm: str):
                 if not target_norm:
                     return None
+
+                # exact normalized match first
+                exact = [tp for tp in tournament_players if self.screenshot_analyzer.normalize_nick(tp.get('ingame_nick') or '') == target_norm]
+                if len(exact) == 1:
+                    return exact[0]
+
+                # substring strong match
+                contains = [
+                    tp for tp in tournament_players
+                    if target_norm in self.screenshot_analyzer.normalize_nick(tp.get('ingame_nick') or '')
+                    or self.screenshot_analyzer.normalize_nick(tp.get('ingame_nick') or '') in target_norm
+                ]
+                if len(contains) == 1:
+                    return contains[0]
+
                 best = None
                 best_score = 0.0
                 for tp in tournament_players:
@@ -1815,7 +1830,7 @@ class TournamentBot:
                     if score > best_score:
                         best_score = score
                         best = tp
-                if best and best_score >= 0.68:
+                if best and best_score >= 0.50:
                     return best
                 return None
 
@@ -1856,7 +1871,7 @@ class TournamentBot:
                         best_total = total
                         best_candidate = candidate
 
-                if best_candidate and best_total >= 1.50:
+                if best_candidate and best_total >= 1.20:
                     return best_candidate
 
             def resolve_caption_user(raw_nick: str):
