@@ -1767,16 +1767,33 @@ class TournamentBot:
             )
             return
 
+        tournament_players = [
+            p for p in (tournament.get('players') or [])
+            if p.get('tournament_status') == 'joined'
+        ]
+        players_by_id = {}
+        for tp in tournament_players:
+            try:
+                players_by_id[int(tp.get('user_id'))] = tp
+            except Exception:
+                continue
+
         pending_users = {}
         pending_match_rows = []
         for m in pending_matches:
-            p1 = self.db.get_player(m['player1_id'])
-            p2 = self.db.get_player(m['player2_id'])
+            try:
+                p1_id = int(m.get('player1_id'))
+                p2_id = int(m.get('player2_id'))
+            except Exception:
+                continue
+
+            p1 = players_by_id.get(p1_id) or self.db.get_player(p1_id)
+            p2 = players_by_id.get(p2_id) or self.db.get_player(p2_id)
             if not p1 or not p2:
                 continue
             pending_match_rows.append((m, p1, p2))
-            pending_users[p1['user_id']] = p1
-            pending_users[p2['user_id']] = p2
+            pending_users[int(p1['user_id'])] = p1
+            pending_users[int(p2['user_id'])] = p2
 
         def resolve_match_by_text(source_text: str):
             if not source_text or not pending_users:
@@ -1793,12 +1810,6 @@ class TournamentBot:
             right_raw = m.group(2).replace('@', '').strip()
             left_norm = self.screenshot_analyzer.normalize_nick(left_raw)
             right_norm = self.screenshot_analyzer.normalize_nick(right_raw)
-
-            # 1) Сначала пытаемся точно сопоставить пару по участникам турнира
-            tournament_players = [
-                p for p in (tournament.get('players') or [])
-                if p.get('tournament_status') == 'joined'
-            ]
 
             def resolve_tournament_user(target_norm: str):
                 if not target_norm:
@@ -1838,11 +1849,11 @@ class TournamentBot:
                 tp1 = resolve_tournament_user(left_norm)
                 tp2 = resolve_tournament_user(right_norm)
                 if tp1 and tp2 and tp1.get('user_id') != tp2.get('user_id'):
-                    uid1 = tp1['user_id']
-                    uid2 = tp2['user_id']
+                    uid1 = int(tp1['user_id'])
+                    uid2 = int(tp2['user_id'])
                     for pmatch, pp1, pp2 in pending_match_rows:
-                        a = pp1.get('user_id')
-                        b = pp2.get('user_id')
+                        a = int(pp1.get('user_id'))
+                        b = int(pp2.get('user_id'))
                         if a == uid1 and b == uid2:
                             return pmatch, pp1, pp2
                         if a == uid2 and b == uid1:
