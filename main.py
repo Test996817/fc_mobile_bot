@@ -1811,13 +1811,39 @@ class TournamentBot:
             return None
 
         caption_match = resolve_match_by_text(caption)
+        hint_key_used = None
         if not caption_match:
-            hint_key = (chat_id, thread_id or 0, user_id)
-            hint = self.pending_match_hints.get(hint_key)
-            if hint and datetime.now().timestamp() - hint.get("ts", 0) <= 900:
+            now_ts = datetime.now().timestamp()
+            candidate_keys = [
+                (chat_id, thread_id or 0, user_id),
+                (chat_id, results_topic_id or 0, user_id),
+            ]
+
+            for key in candidate_keys:
+                hint = self.pending_match_hints.get(key)
+                if not hint:
+                    continue
+                if now_ts - hint.get("ts", 0) > 900:
+                    self.pending_match_hints.pop(key, None)
+                    continue
                 caption_match = resolve_match_by_text(hint.get("text", ""))
-            elif hint:
-                self.pending_match_hints.pop(hint_key, None)
+                if caption_match:
+                    hint_key_used = key
+                    break
+
+            if not caption_match:
+                # fallback: any свежая подсказка этого пользователя в чате
+                for key, hint in list(self.pending_match_hints.items()):
+                    k_chat, _k_thread, k_user = key
+                    if k_chat != chat_id or k_user != user_id:
+                        continue
+                    if now_ts - hint.get("ts", 0) > 900:
+                        self.pending_match_hints.pop(key, None)
+                        continue
+                    caption_match = resolve_match_by_text(hint.get("text", ""))
+                    if caption_match:
+                        hint_key_used = key
+                        break
 
         if not caption_match:
             await self._send_results_reply(
@@ -1830,6 +1856,10 @@ class TournamentBot:
             return
 
         self.pending_match_hints.pop((chat_id, thread_id or 0, user_id), None)
+        if results_topic_id:
+            self.pending_match_hints.pop((chat_id, results_topic_id, user_id), None)
+        if hint_key_used:
+            self.pending_match_hints.pop(hint_key_used, None)
 
         match, cp1, cp2 = caption_match
 
