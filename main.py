@@ -861,31 +861,49 @@ class ScreenshotAnalyzer:
 
         lines = [normalize_ocr_chars(line.strip()) for line in text.split('\n') if line.strip()]
         candidates: List[Tuple[int, int, int]] = []  # score1, score2, confidence
+        score_pattern = re.compile(r'(?<![\dA-Za-zА-Яа-я])(\d{1,2})\s*[:\-–—]\s*(\d{1,2})(?![\dA-Za-zА-Яа-я])')
 
         for idx, line in enumerate(lines[:15]):
-            for m in re.finditer(r'(?<!\d)(\d{1,2})\s*[:\-–—]\s*(\d{1,2})(?!\d)', line):
+            for m in score_pattern.finditer(line):
                 s1, s2 = int(m.group(1)), int(m.group(2))
                 if valid_pair(s1, s2):
                     confidence = 120 - idx
                     candidates.append((s1, s2, confidence))
 
-            for m in re.finditer(r'(?<!\d)(\d{1,2})\s+(\d{1,2})(?!\d)', line):
-                s1, s2 = int(m.group(1)), int(m.group(2))
-                if valid_pair(s1, s2):
-                    confidence = 70 - idx
-                    candidates.append((s1, s2, confidence))
-
-        flat_text = normalize_ocr_chars(' '.join(lines))
-        for m in re.finditer(r'(?<!\d)(\d{1,2})\s*[:\-–—]\s*(\d{1,2})(?!\d)', flat_text):
-            s1, s2 = int(m.group(1)), int(m.group(2))
-            if valid_pair(s1, s2):
-                candidates.append((s1, s2, 60))
-
         if not candidates:
             return None, None
 
-        candidates.sort(key=lambda x: x[2], reverse=True)
-        return candidates[0][0], candidates[0][1]
+        aggregated: Dict[Tuple[int, int], Dict[str, int]] = {}
+        for s1, s2, confidence in candidates:
+            key = (s1, s2)
+            current = aggregated.get(key)
+            if not current:
+                aggregated[key] = {
+                    "sum_conf": confidence,
+                    "count": 1,
+                    "max_conf": confidence,
+                }
+                continue
+            current["sum_conf"] += confidence
+            current["count"] += 1
+            current["max_conf"] = max(current["max_conf"], confidence)
+
+        ranking = sorted(
+            aggregated.items(),
+            key=lambda item: (item[1]["sum_conf"], item[1]["count"], item[1]["max_conf"]),
+            reverse=True,
+        )
+
+        best_pair, best_stats = ranking[0]
+        if len(ranking) > 1:
+            second_stats = ranking[1][1]
+            score_gap = best_stats["sum_conf"] - second_stats["sum_conf"]
+
+            # Если OCR дал несколько близких вариантов, считаем скрин неоднозначным.
+            if score_gap < 20 and best_stats["count"] == 1:
+                return None, None
+
+        return best_pair[0], best_pair[1]
 
     def normalize_nick(self, value: str) -> str:
         if not value:
@@ -2001,6 +2019,20 @@ class TournamentBot:
             await self._send_results_reply(context, chat_id, output_thread_id, text)
             return
 
+        if len(recognized_scores) != total:
+            per_screen = ", ".join([f"#{idx} {s1}:{s2}" for idx, s1, s2, _ in recognized_scores])
+            text = (
+                "❌ Обнаружен неполный/неоднозначный набор счётов, результат не записан.\n"
+                f"Распознано скринов: {len(recognized_scores)}/{total}"
+            )
+            if per_screen:
+                text += f"\nСчета по скринам: {per_screen}"
+            if unrecognized:
+                text += f"\n⚠️ Не распознано скринов: {', '.join(map(str, unrecognized))}"
+            text += "\nОтправь скрины повторно или внеси результат вручную через /gresult."
+            await self._send_results_reply(context, chat_id, output_thread_id, text)
+            return
+
         total_s1 = sum(s1 for _, s1, _, _ in recognized_scores)
         total_s2 = sum(s2 for _, _, s2, _ in recognized_scores)
         chosen_file_id = recognized_scores[0][3]
@@ -2032,8 +2064,11 @@ class TournamentBot:
 
         p1 = self.db.get_player(match['player1_id'])
         p2 = self.db.get_player(match['player2_id'])
+        per_screen = ", ".join([f"#{idx} {s1}:{s2}" for idx, s1, s2, _ in recognized_scores])
         text = f"✅ Результат записан (сумма игр): {p1['ingame_nick']} {p1_score}:{p2_score} {p2['ingame_nick']}"
         text += f"\nРаспознано скринов: {len(recognized_scores)}/{total}"
+        if per_screen:
+            text += f"\nСчета по скринам: {per_screen}"
         if unrecognized:
             text += f"\n⚠️ Не распознано скринов: {', '.join(map(str, unrecognized))}"
         await self._send_results_reply(context, chat_id, output_thread_id, text)
