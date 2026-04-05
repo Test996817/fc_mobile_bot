@@ -1037,6 +1037,9 @@ class TournamentBot:
             output.append((stage, wins_needed, matches))
         return output
 
+    def as_monospace_block(self, text: str) -> str:
+        return f"<pre>{html.escape(text)}</pre>"
+
     async def send_groups_graphic(
         self,
         chat_id: int,
@@ -1170,12 +1173,13 @@ class TournamentBot:
                     pass
     
     async def send_groups_table(self, chat_id: int, tournament_id: int, message_thread_id: int = None) -> Tuple[int, int]:
-        text = self.generate_groups_table(tournament_id)
+        text = self.as_monospace_block(self.generate_groups_table(tournament_id))
         
         try:
             send_kwargs = {
                 "chat_id": chat_id,
                 "text": text,
+                "parse_mode": "HTML",
             }
             if message_thread_id:
                 send_kwargs["message_thread_id"] = message_thread_id
@@ -1196,13 +1200,14 @@ class TournamentBot:
             return 0, 0
     
     async def update_groups_table(self, chat_id: int, message_id: int, tournament_id: int):
-        text = self.generate_groups_table(tournament_id)
+        text = self.as_monospace_block(self.generate_groups_table(tournament_id))
         
         try:
             await self.application.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
-                text=text
+                text=text,
+                parse_mode="HTML",
             )
         except Exception as e:
             logger.error(f"Error updating groups table: {e}")
@@ -1776,8 +1781,8 @@ class TournamentBot:
             "🏆 Плей-офф и визуал:\n"
             "/playoff - генерация плей-офф\n"
             "/pw [стадия] [№] [ник] [счёт] - результат\n"
-            "/gtable [theme] [orientation] - графическая таблица групп\n"
-            "/pbracket [theme] [orientation] - графическая сетка плей-офф\n\n"
+            "/gtable - таблица групп (моноширинный текст)\n"
+            "/pbracket - сетка плей-офф (моноширинный текст)\n\n"
             "📊 Аналитика и сервис:\n"
             "/elo - таблица рейтинга\n"
             "/tinfo [ID] - информация по турниру\n"
@@ -2263,26 +2268,10 @@ class TournamentBot:
             await update.message.reply_text("Нет активного турнира в этом чате.")
             return
 
-        theme, orientation, err = self.parse_visual_options(context.args)
-        if err:
-            await update.message.reply_text(
-                "❌ Неверные параметры. Используйте: /gtable [minimal|bright] [vertical|horizontal]"
-            )
-            return
-
-        ok = await self.send_groups_graphic(
-            chat_id=update.effective_chat.id,
-            tournament=tournament,
-            theme=theme,
-            orientation=orientation,
-            message_thread_id=update.message.message_thread_id,
+        await update.message.reply_text(
+            self.as_monospace_block(self.generate_groups_table(tournament["id"])),
+            parse_mode="HTML",
         )
-
-        if not ok:
-            await update.message.reply_text(
-                "⚠️ Не удалось сгенерировать графику, отправляю текстовую таблицу."
-            )
-            await update.message.reply_text(self.generate_groups_table(tournament["id"]))
 
     async def cmd_playoff_graphic(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
@@ -2294,30 +2283,11 @@ class TournamentBot:
             await update.message.reply_text("Нет активного турнира в этом чате.")
             return
 
-        theme, orientation, err = self.parse_visual_options(context.args)
-        if err:
-            await update.message.reply_text(
-                "❌ Неверные параметры. Используйте: /pbracket [minimal|bright] [vertical|horizontal]"
-            )
-            return
-
-        ok = await self.send_playoff_graphic(
-            chat_id=update.effective_chat.id,
-            tournament=tournament,
-            theme=theme,
-            orientation=orientation,
-            message_thread_id=update.message.message_thread_id,
+        await update.message.reply_text(
+            self.format_playoff_bracket(tournament["id"]),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
         )
-
-        if not ok:
-            await update.message.reply_text(
-                "⚠️ Не удалось сгенерировать графику, отправляю текстовую сетку."
-            )
-            await update.message.reply_text(
-                self.format_playoff_bracket(tournament["id"]),
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
 
     def build_ai_tournament_context(self, tournament: Dict) -> str:
         matches = self.db.get_tournament_matches(tournament['id'])
@@ -2789,14 +2759,6 @@ class TournamentBot:
         )
         self.db.conn.commit()
 
-        await self.send_playoff_graphic(
-            chat_id=chat_id,
-            tournament=tournament,
-            theme='minimal',
-            orientation='vertical',
-            message_thread_id=update.message.message_thread_id,
-        )
-
     def set_playoff_match_slot(self, tournament_id: int, stage: str, match_num: int, slot: int, nick: str):
         matches = self.db.get_playoff_matches(tournament_id, stage)
         existing = next((m for m in matches if m['match_num'] == match_num), None)
@@ -3079,15 +3041,7 @@ class TournamentBot:
             except Exception as e:
                 logger.error(f"Error editing playoff text message: {e}")
 
-        if tournament.get('playoff_graphic_message_id'):
-            await self.send_playoff_graphic(
-                chat_id=chat_id,
-                tournament=tournament,
-                theme='minimal',
-                orientation='vertical',
-                message_thread_id=update.message.message_thread_id,
-                create_if_missing=False,
-            )
+
         
         result_text = f"✅ Записан результат:\n"
         result_text += f"{match['player1_nick']} {player1_wins}-{player2_wins} {match['player2_nick']}\n"
