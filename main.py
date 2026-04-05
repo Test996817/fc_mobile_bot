@@ -2059,22 +2059,33 @@ class TournamentBot:
         else:
             winner_id = None
 
-        await self.process_match_result(match, p1_score, p2_score, winner_id, user_id, chosen_file_id)
+        match_notification = await self.process_match_result(
+            match,
+            p1_score,
+            p2_score,
+            winner_id,
+            user_id,
+            chosen_file_id,
+            send_notification=False,
+        )
         self.cooldowns[user_id] = current_time
 
         p1 = self.db.get_player(match['player1_id'])
         p2 = self.db.get_player(match['player2_id'])
         per_screen = ", ".join([f"#{idx} {s1}:{s2}" for idx, s1, s2, _ in recognized_scores])
-        text = f"✅ Результат записан (сумма игр): {p1['ingame_nick']} {p1_score}:{p2_score} {p2['ingame_nick']}"
-        text += f"\nРаспознано скринов: {len(recognized_scores)}/{total}"
+        ocr_summary = f"✅ Результат записан (сумма игр): {p1['ingame_nick']} {p1_score}:{p2_score} {p2['ingame_nick']}"
+        ocr_summary += f"\nРаспознано скринов: {len(recognized_scores)}/{total}"
         if per_screen:
-            text += f"\nСчета по скринам: {per_screen}"
+            ocr_summary += f"\nСчета по скринам: {per_screen}"
         if unrecognized:
-            text += f"\n⚠️ Не распознано скринов: {', '.join(map(str, unrecognized))}"
-        await self._send_results_reply(context, chat_id, output_thread_id, text)
+            ocr_summary += f"\n⚠️ Не распознано скринов: {', '.join(map(str, unrecognized))}"
+
+        full_text = f"{match_notification}\n\n{ocr_summary}" if match_notification else ocr_summary
+        await self._send_results_reply(context, chat_id, output_thread_id, full_text)
     
     async def process_match_result(self, match: Dict, score1: int, score2: int,
-                                  winner_id: int, reported_by: int, screenshot_id: str = None):
+                                  winner_id: int, reported_by: int, screenshot_id: str = None,
+                                  send_notification: bool = True) -> str:
         self.db.update_match_result(match['id'], score1, score2, winner_id, 
                                    reported_by, screenshot_id)
         
@@ -2116,7 +2127,8 @@ class TournamentBot:
         
         tournament = self.db.get_tournament(match['tournament_id'])
         if tournament:
-            await self.notify_admin(tournament['chat_id'], notification)
+            if send_notification:
+                await self.notify_admin(tournament['chat_id'], notification)
 
             if match.get('group_name'):
                 groups_message_id = tournament.get('groups_message_id')
@@ -2144,6 +2156,8 @@ class TournamentBot:
                     message_thread_id=thread_id,
                     create_if_missing=False,
                 )
+
+        return notification
     
     async def cmd_admin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
