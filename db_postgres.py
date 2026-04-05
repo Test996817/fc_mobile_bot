@@ -8,7 +8,7 @@ import logging
 import sqlite3
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import psycopg2
 from psycopg2.extras import RealDictCursor

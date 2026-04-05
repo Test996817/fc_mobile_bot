@@ -923,6 +923,10 @@ class TournamentBot:
         
         self.application.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
+        self.application.add_error_handler(self.handle_error)
+
+    async def handle_error(self, update: object, context: ContextTypes.DEFAULT_TYPE):
+        logger.exception("Unhandled exception while processing update", exc_info=context.error)
 
     async def notify_admin(self, chat_id: int, message: str):
         try:
