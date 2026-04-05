@@ -1611,6 +1611,9 @@ class TournamentBot:
     ):
         import time
 
+        screenshots_dir = "screenshots"
+        os.makedirs(screenshots_dir, exist_ok=True)
+
         player = self.db.get_player(user_id)
         if not player:
             return
@@ -1693,7 +1696,9 @@ class TournamentBot:
         for i, photo in enumerate(photos, start=1):
             try:
                 photo_file = await context.bot.get_file(photo.file_id)
-                photo_path = f"screenshots/match_{photo.file_id}.jpg"
+                safe_file_id = re.sub(r"[^A-Za-z0-9_-]+", "_", photo.file_id)
+                safe_file_id = safe_file_id[:120] if safe_file_id else f"photo_{i}"
+                photo_path = os.path.join(screenshots_dir, f"match_{safe_file_id}.jpg")
                 await photo_file.download_to_drive(photo_path)
 
                 screenshot_text = self.screenshot_analyzer.extract_text(photo_path)
