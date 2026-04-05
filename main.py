@@ -8,6 +8,7 @@ import random
 import asyncio
 import html
 import shutil
+import unicodedata
 
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta
@@ -839,50 +840,59 @@ class ScreenshotAnalyzer:
             return ""
     
     def extract_scores(self, text: str) -> Tuple[Optional[int], Optional[int]]:
-        lines = text.strip().split('\n')
-        
-        for line in lines[:5]:
-            line = line.strip()
-            if not line:
-                continue
-            
-            numbers = re.findall(r'\d', line)
-            if len(numbers) == 4:
-                s1 = int(numbers[0] + numbers[1])
-                s2 = int(numbers[2] + numbers[3])
-                if 0 <= s1 <= self.max_plausible_score and 0 <= s2 <= self.max_plausible_score:
-                    return s1, s2
-            
-            match = re.search(r'(\d)\s+(\d)\s*[^\w\s]\s*(\d{1,2})', line)
-            if match:
-                try:
-                    s1 = int(match.group(1) + match.group(2))
-                    s2 = int(match.group(3))
-                    if 0 <= s1 <= self.max_plausible_score and 0 <= s2 <= self.max_plausible_score:
-                        return s1, s2
-                except ValueError:
-                    pass
-            
-            match = re.search(r'(\d{1,2})\s*[^\w\s]+\s*(\d{1,2})', line)
-            if match:
-                try:
-                    s1, s2 = int(match.group(1)), int(match.group(2))
-                    if 0 <= s1 <= self.max_plausible_score and 0 <= s2 <= self.max_plausible_score:
-                        return s1, s2
-                except ValueError:
-                    pass
-        
-        all_text = text.replace('\n', ' ')
-        pairs = re.findall(r'(\d{1,2})\s*[^\w\d\s]+\s*(\d{1,2})', all_text)
-        for s1, s2 in pairs:
-            try:
-                n1, n2 = int(s1), int(s2)
-                if 0 <= n1 <= self.max_plausible_score and 0 <= n2 <= self.max_plausible_score:
-                    return n1, n2
-            except ValueError:
-                continue
-        
-        return None, None
+        if not text:
+            return None, None
+
+        def normalize_ocr_chars(value: str) -> str:
+            mapped = {
+                'O': '0', 'o': '0', 'Q': '0', 'D': '0',
+                'I': '1', 'l': '1', '|': '1',
+                'S': '5', 's': '5',
+                'B': '8',
+                'Z': '2',
+            }
+            normalized = []
+            for ch in value:
+                normalized.append(mapped.get(ch, ch))
+            return ''.join(normalized)
+
+        def valid_pair(a: int, b: int) -> bool:
+            return 0 <= a <= self.max_plausible_score and 0 <= b <= self.max_plausible_score
+
+        lines = [normalize_ocr_chars(line.strip()) for line in text.split('\n') if line.strip()]
+        candidates: List[Tuple[int, int, int]] = []  # score1, score2, confidence
+
+        for idx, line in enumerate(lines[:15]):
+            for m in re.finditer(r'(?<!\d)(\d{1,2})\s*[:\-–—]\s*(\d{1,2})(?!\d)', line):
+                s1, s2 = int(m.group(1)), int(m.group(2))
+                if valid_pair(s1, s2):
+                    confidence = 120 - idx
+                    candidates.append((s1, s2, confidence))
+
+            for m in re.finditer(r'(?<!\d)(\d{1,2})\s+(\d{1,2})(?!\d)', line):
+                s1, s2 = int(m.group(1)), int(m.group(2))
+                if valid_pair(s1, s2):
+                    confidence = 70 - idx
+                    candidates.append((s1, s2, confidence))
+
+        flat_text = normalize_ocr_chars(' '.join(lines))
+        for m in re.finditer(r'(?<!\d)(\d{1,2})\s*[:\-–—]\s*(\d{1,2})(?!\d)', flat_text):
+            s1, s2 = int(m.group(1)), int(m.group(2))
+            if valid_pair(s1, s2):
+                candidates.append((s1, s2, 60))
+
+        if not candidates:
+            return None, None
+
+        candidates.sort(key=lambda x: x[2], reverse=True)
+        return candidates[0][0], candidates[0][1]
+
+    def normalize_nick(self, value: str) -> str:
+        if not value:
+            return ""
+        norm = unicodedata.normalize("NFKC", value).lower().replace('@', '').strip()
+        # оставляем только буквы/цифры для устойчивого fuzzy-сопоставления
+        return ''.join(ch for ch in norm if ch.isalnum())
 
     def extract_nick_tokens(self, text: str) -> List[str]:
         if not text:
@@ -903,6 +913,11 @@ class ScreenshotAnalyzer:
                 if token not in seen:
                     seen.add(token)
                     tokens.append(token)
+
+                norm_token = self.normalize_nick(token)
+                if norm_token and norm_token not in seen:
+                    seen.add(norm_token)
+                    tokens.append(norm_token)
 
         return tokens
 
@@ -1255,8 +1270,29 @@ class TournamentBot:
                 text=text,
                 parse_mode="HTML",
             )
+            return True
         except Exception as e:
             logger.error(f"Error updating groups table: {e}")
+            return False
+
+    async def send_groups_table_message(self, chat_id: int, tournament_id: int, message_thread_id: int = None) -> int:
+        text = self.as_monospace_block(self.generate_groups_table(tournament_id))
+        try:
+            kwargs = {
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+            }
+            if message_thread_id:
+                kwargs["message_thread_id"] = message_thread_id
+
+            msg = await self.application.bot.send_message(**kwargs)
+            topic_id = message_thread_id or msg.message_thread_id or 0
+            self.db.update_tournament_groups_info(tournament_id, topic_id, msg.message_id)
+            return msg.message_id
+        except Exception as e:
+            logger.error(f"Error sending tracked groups table: {e}")
+            return 0
 
     async def cmd_resend_groups(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
@@ -1611,7 +1647,6 @@ class TournamentBot:
             user_id=update.effective_user.id,
             photos=[photo],
             caption=msg.caption or "",
-            reply_message=msg,
         )
 
     async def _flush_media_group(self, key, context: ContextTypes.DEFAULT_TYPE):
@@ -1633,11 +1668,7 @@ class TournamentBot:
         except asyncio.CancelledError:
             return
 
-    async def _send_results_reply(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, thread_id: int, text: str, reply_message=None):
-        if reply_message is not None:
-            await reply_message.reply_text(text)
-            return
-
+    async def _send_results_reply(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, thread_id: int, text: str):
         kwargs = {"chat_id": chat_id, "text": text}
         if thread_id:
             kwargs["message_thread_id"] = thread_id
@@ -1651,7 +1682,6 @@ class TournamentBot:
         user_id: int,
         photos,
         caption: str,
-        reply_message=None,
     ):
         import time
 
@@ -1667,13 +1697,13 @@ class TournamentBot:
             return
 
         results_topic_id = tournament.get('results_topic_id')
+        output_thread_id = results_topic_id or thread_id
         if results_topic_id and thread_id != results_topic_id:
             await self._send_results_reply(
                 context,
                 chat_id,
                 thread_id,
                 "❌ Результаты принимаются только в топике результатов.",
-                reply_message=reply_message,
             )
             return
 
@@ -1685,9 +1715,8 @@ class TournamentBot:
                 await self._send_results_reply(
                     context,
                     chat_id,
-                    thread_id,
+                    output_thread_id,
                     f"⏳ Подожди {remaining} сек. перед следующей отправкой результата.",
-                    reply_message=reply_message,
                 )
                 return
 
@@ -1696,46 +1725,69 @@ class TournamentBot:
             await self._send_results_reply(
                 context,
                 chat_id,
-                thread_id,
+                output_thread_id,
                 "❌ У тебя нет ожидающих матчей для отправки результата.",
-                reply_message=reply_message,
             )
             return
 
-        pending_by_id = {}
-        pending_nicks = {}
+        pending_users = {}
         for m in pending_matches:
             p1 = self.db.get_player(m['player1_id'])
             p2 = self.db.get_player(m['player2_id'])
             if not p1 or not p2:
                 continue
-            pending_by_id[m['id']] = (m, p1, p2)
-            pending_nicks[m['id']] = {
-                p1['user_id']: (p1.get('ingame_nick') or '').lower(),
-                p2['user_id']: (p2.get('ingame_nick') or '').lower(),
-            }
+            pending_users[p1['user_id']] = p1
+            pending_users[p2['user_id']] = p2
 
         caption_match = None
-        if caption:
-            nick_match = re.match(r'@?(\S+)\s*[-–]\s*@?(\S+)', caption)
-            if nick_match:
-                nick1 = nick_match.group(1).replace('@', '')
-                nick2 = nick_match.group(2).replace('@', '')
-                cp1 = self.db.get_player_by_nick(nick1)
-                cp2 = self.db.get_player_by_nick(nick2)
-                if cp1 and cp2:
+        if caption and pending_users:
+            first_line = caption.strip().split('\n')[0]
+            m = re.search(r'(.+?)\s*(?:-|–|—|vs|VS|:){1}\s*(.+)', first_line)
+            if m:
+                left_raw = m.group(1).replace('@', '').strip()
+                right_raw = m.group(2).replace('@', '').strip()
+
+                def resolve_caption_user(raw_nick: str):
+                    target = self.screenshot_analyzer.normalize_nick(raw_nick)
+                    if not target:
+                        return None
+                    best_user_id = None
+                    best_score = 0.0
+                    for uid, p in pending_users.items():
+                        p_norm = self.screenshot_analyzer.normalize_nick(p.get('ingame_nick') or '')
+                        if not p_norm:
+                            continue
+                        score = SequenceMatcher(None, target, p_norm).ratio()
+                        if target in p_norm or p_norm in target:
+                            score = max(score, 0.95)
+                        if score > best_score:
+                            best_score = score
+                            best_user_id = uid
+                    if best_user_id and best_score >= 0.68:
+                        return pending_users[best_user_id]
+                    return None
+
+                cp1 = resolve_caption_user(left_raw)
+                cp2 = resolve_caption_user(right_raw)
+                if cp1 and cp2 and cp1['user_id'] != cp2['user_id']:
                     cmatch = self.db.find_match_between_players(tournament['id'], cp1['user_id'], cp2['user_id'])
                     if cmatch:
                         caption_match = (cmatch, cp1, cp2)
 
-        results = []
-        unrecognized = []
-        unresolved_nicks = []
+        if not caption_match:
+            await self._send_results_reply(
+                context,
+                chat_id,
+                output_thread_id,
+                "❌ Не удалось определить матч по подписи.\n"
+                "Укажи подпись в формате: player1 - player2",
+            )
+            return
 
-        def similarity(a: str, b: str) -> float:
-            if not a or not b:
-                return 0.0
-            return SequenceMatcher(None, a, b).ratio()
+        match, cp1, cp2 = caption_match
+
+        recognized_scores = []
+        unrecognized = []
 
         for i, photo in enumerate(photos, start=1):
             try:
@@ -1747,107 +1799,64 @@ class TournamentBot:
 
                 screenshot_text = self.screenshot_analyzer.extract_text(photo_path)
                 score1, score2 = self.screenshot_analyzer.extract_scores(screenshot_text)
-                nick_tokens = self.screenshot_analyzer.extract_nick_tokens(screenshot_text)
-
-                best_match_id = None
-                best_score = 0.0
-                second_score = 0.0
-                detected_order = None
-
-                for match_id, nick_map in pending_nicks.items():
-                    m, p1, p2 = pending_by_id[match_id]
-                    nick_p1 = nick_map.get(p1['user_id'], '')
-                    nick_p2 = nick_map.get(p2['user_id'], '')
-
-                    p1_best = max((similarity(token, nick_p1) for token in nick_tokens), default=0.0)
-                    p2_best = max((similarity(token, nick_p2) for token in nick_tokens), default=0.0)
-
-                    if p1_best < 0.74 or p2_best < 0.74:
-                        continue
-
-                    total = p1_best + p2_best
-                    if total > best_score:
-                        second_score = best_score
-                        best_score = total
-                        best_match_id = match_id
-
-                        text_lower = screenshot_text.lower()
-                        pos1 = text_lower.find(nick_p1)
-                        pos2 = text_lower.find(nick_p2)
-                        if pos1 != -1 and pos2 != -1:
-                            detected_order = (p1['user_id'], p2['user_id']) if pos1 <= pos2 else (p2['user_id'], p1['user_id'])
-                        else:
-                            detected_order = None
-                    elif total > second_score:
-                        second_score = total
-
-                if best_match_id is None or (best_score - second_score) < 0.08 or detected_order is None:
-                    if caption_match:
-                        match, p1, p2 = caption_match
-                        detected_order = (p1['user_id'], p2['user_id'])
-                    else:
-                        unresolved_nicks.append(i)
-                        continue
-                else:
-                    match, p1, p2 = pending_by_id[best_match_id]
 
                 if score1 is None or score2 is None:
                     unrecognized.append(i)
                     continue
-
-                first_user_id, second_user_id = detected_order
-                score_by_user = {
-                    first_user_id: score1,
-                    second_user_id: score2,
-                }
-                p1_score = score_by_user.get(p1['user_id'])
-                p2_score = score_by_user.get(p2['user_id'])
-
-                if p1_score is None or p2_score is None:
-                    unresolved_nicks.append(i)
-                    continue
-
-                if p1_score > p2_score:
-                    winner_id = p1['user_id']
-                elif p2_score > p1_score:
-                    winner_id = p2['user_id']
-                else:
-                    winner_id = None
-
-                await self.process_match_result(match, p1_score, p2_score, winner_id, user_id, photo.file_id)
-                results.append(f"📸 {p1['ingame_nick']} {p1_score}:{p2_score} {p2['ingame_nick']}")
+                recognized_scores.append((i, score1, score2, photo.file_id))
             except Exception as e:
                 logger.error(f"Error processing photo {photo.file_id}: {e}")
                 unrecognized.append(i)
 
         total = len(photos)
-        if results:
-            self.cooldowns[user_id] = current_time
-            text = f"✅ Результаты ({len(results)}/{total}):\n"
-            text += "\n".join(results)
-            if unresolved_nicks:
-                text += (
-                    f"\n\n❌ Не удалось распознать ники ({len(unresolved_nicks)}/{total}): "
-                    f"скриншот {', '.join(map(str, unresolved_nicks))}"
-                )
-                text += "\nНапиши ники в формате: player1 - player2"
-            if unrecognized:
-                text += f"\n\n❌ Не распознано ({len(unrecognized)}/{total}): скриншот {', '.join(map(str, unrecognized))}"
-                text += "\nИспользуйте /gresult для ввода оставшихся результатов."
-            await self._send_results_reply(context, chat_id, thread_id, text, reply_message=reply_message)
+        if not recognized_scores:
+            text = (
+                "❌ Не удалось распознать счёт на скриншотах.\n"
+                "Проверь качество скрина или внеси результат вручную через /gresult."
+            )
+            await self._send_results_reply(context, chat_id, output_thread_id, text)
             return
 
-        if unresolved_nicks and not unrecognized:
-            text = (
-                "❌ Не удалось распознать ники игроков на скриншотах.\n"
-                "Напиши ники в формате: player1 - player2"
+        score_counter = {}
+        for _, s1, s2, _ in recognized_scores:
+            key = (s1, s2)
+            score_counter[key] = score_counter.get(key, 0) + 1
+        (best_s1, best_s2), _ = max(score_counter.items(), key=lambda item: item[1])
+
+        chosen_file_id = next(fid for _, s1, s2, fid in recognized_scores if s1 == best_s1 and s2 == best_s2)
+        score_by_user = {
+            cp1['user_id']: best_s1,
+            cp2['user_id']: best_s2,
+        }
+        p1_score = score_by_user.get(match['player1_id'])
+        p2_score = score_by_user.get(match['player2_id'])
+
+        if p1_score is None or p2_score is None:
+            await self._send_results_reply(
+                context,
+                chat_id,
+                output_thread_id,
+                "❌ Подпись не соответствует участникам матча. Используй /gresult.",
             )
+            return
+
+        if p1_score > p2_score:
+            winner_id = match['player1_id']
+        elif p2_score > p1_score:
+            winner_id = match['player2_id']
         else:
-            text = (
-                "❌ Не удалось распознать счёт/ники на скриншотах.\n"
-                "Напиши ники в формате: player1 - player2 или используй /gresult."
-            )
-        await self._send_results_reply(context, chat_id, thread_id, text, reply_message=reply_message)
+            winner_id = None
+
+        await self.process_match_result(match, p1_score, p2_score, winner_id, user_id, chosen_file_id)
+        self.cooldowns[user_id] = current_time
+
+        p1 = self.db.get_player(match['player1_id'])
+        p2 = self.db.get_player(match['player2_id'])
+        text = f"✅ Результат записан: {p1['ingame_nick']} {p1_score}:{p2_score} {p2['ingame_nick']}"
+        text += f"\nСчитано со скринов: {len(recognized_scores)}/{total}"
+        if unrecognized:
+            text += f"\n⚠️ Не распознано скринов: {', '.join(map(str, unrecognized))}"
+        await self._send_results_reply(context, chat_id, output_thread_id, text)
     
     async def process_match_result(self, match: Dict, score1: int, score2: int,
                                   winner_id: int, reported_by: int, screenshot_id: str = None):
@@ -1893,6 +1902,22 @@ class TournamentBot:
         tournament = self.db.get_tournament(match['tournament_id'])
         if tournament:
             await self.notify_admin(tournament['chat_id'], notification)
+
+            if match.get('group_name'):
+                groups_message_id = tournament.get('groups_message_id')
+                if groups_message_id:
+                    updated = await self.update_groups_table(
+                        tournament['chat_id'],
+                        groups_message_id,
+                        tournament['id'],
+                    )
+                    if not updated:
+                        thread_id = tournament.get('groups_topic_id') or tournament.get('results_topic_id')
+                        await self.send_groups_table_message(
+                            chat_id=tournament['chat_id'],
+                            tournament_id=tournament['id'],
+                            message_thread_id=thread_id,
+                        )
 
             if match.get('group_name') and tournament.get('groups_graphic_message_id'):
                 thread_id = tournament.get('results_topic_id')
@@ -2414,10 +2439,22 @@ class TournamentBot:
             await update.message.reply_text("Нет активного турнира в этом чате.")
             return
 
-        await update.message.reply_text(
-            self.as_monospace_block(self.generate_groups_table(tournament["id"])),
-            parse_mode="HTML",
+        chat_id = update.effective_chat.id
+        thread_id = update.message.message_thread_id or tournament.get('groups_topic_id') or tournament.get('results_topic_id')
+        groups_message_id = tournament.get('groups_message_id')
+
+        if groups_message_id:
+            updated = await self.update_groups_table(chat_id, groups_message_id, tournament["id"])
+            if updated:
+                return
+
+        sent_message_id = await self.send_groups_table_message(
+            chat_id=chat_id,
+            tournament_id=tournament["id"],
+            message_thread_id=thread_id,
         )
+        if not sent_message_id:
+            await update.message.reply_text("❌ Не удалось отправить таблицу групп.")
 
     async def cmd_playoff_graphic(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
