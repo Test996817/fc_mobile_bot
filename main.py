@@ -1771,12 +1771,6 @@ class TournamentBot:
         results_topic_id = tournament.get('results_topic_id')
         output_thread_id = results_topic_id or thread_id
         if results_topic_id and thread_id != results_topic_id:
-            await self._send_results_reply(
-                context,
-                chat_id,
-                thread_id,
-                "❌ Результаты принимаются только в топике результатов.",
-            )
             return
 
         current_time = time.time()
