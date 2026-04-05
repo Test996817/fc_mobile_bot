@@ -1958,8 +1958,8 @@ class TournamentBot:
             group_name = f"Группа {chr(64 + group_num)}"
             
             self.db.cursor.execute('''
-                UPDATE tournament_players SET group_name = ?
-                WHERE tournament_id = ? AND user_id = ?
+                UPDATE tournament_players SET group_name = %s
+                WHERE tournament_id = %s AND user_id = %s
             ''', (group_name, tournament['id'], player['user_id']))
             
             if group_name not in groups:
@@ -2708,7 +2708,7 @@ class TournamentBot:
         msg = await update.message.reply_text(bracket_text, parse_mode='HTML', disable_web_page_preview=True)
         
         self.db.cursor.execute(
-            'UPDATE tournaments SET playoff_message_id = ? WHERE id = ?',
+            'UPDATE tournaments SET playoff_message_id = %s WHERE id = %s',
             (msg.message_id, tournament['id'])
         )
         self.db.conn.commit()
