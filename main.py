@@ -936,6 +936,7 @@ class TournamentBot:
         self.ai_cooldowns = {}
         self.media_groups_buffer = {}
         self.media_groups_tasks = {}
+        self.pending_match_hints = {}
         self.setup_handlers()
     
     def setup_handlers(self):
@@ -982,6 +983,10 @@ class TournamentBot:
             filters.Regex(r'^RESULTS_TOPIC$'), 
             self.handle_results_topic_message
         ))
+        self.application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.Regex(r'^\s*@?\S.{0,40}\s*(?:-|–|—|vs|VS)\s*@?\S.{0,40}\s*$'),
+            self.handle_match_hint_message
+        ))
         
         self.application.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
@@ -1027,6 +1032,32 @@ class TournamentBot:
         
         self.db.update_tournament_results_topic(tournament['id'], topic_id)
         await update.message.reply_text(f"✅ Топик результатов сохранён (ID: {topic_id})")
+
+    async def handle_match_hint_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not update.message or not update.message.text:
+            return
+
+        user_id = update.effective_user.id
+        player = self.db.get_player(user_id)
+        if not player:
+            return
+
+        chat_id = update.effective_chat.id
+        tournament = self.db.get_tournament_by_chat(chat_id)
+        if not tournament:
+            return
+
+        results_topic_id = tournament.get('results_topic_id')
+        thread_id = update.message.message_thread_id
+        if results_topic_id and thread_id != results_topic_id:
+            return
+
+        key = (chat_id, thread_id or 0, user_id)
+        self.pending_match_hints[key] = {
+            "text": update.message.text.strip(),
+            "ts": datetime.now().timestamp(),
+        }
+        await update.message.reply_text("✅ Пара принята. Теперь отправь скриншоты.")
     
     def generate_groups_table(self, tournament_id: int) -> str:
         text = "━━━━━━━━━━━━━━━━━━━━\n🏆 ГРУППОВОЙ ЭТАП\n━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1739,40 +1770,54 @@ class TournamentBot:
             pending_users[p1['user_id']] = p1
             pending_users[p2['user_id']] = p2
 
-        caption_match = None
-        if caption and pending_users:
-            first_line = caption.strip().split('\n')[0]
+        def resolve_match_by_text(source_text: str):
+            if not source_text or not pending_users:
+                return None
+
+            first_line = source_text.strip().split('\n')[0]
             m = re.search(r'(.+?)\s*(?:-|–|—|vs|VS|:){1}\s*(.+)', first_line)
-            if m:
-                left_raw = m.group(1).replace('@', '').strip()
-                right_raw = m.group(2).replace('@', '').strip()
+            if not m:
+                return None
 
-                def resolve_caption_user(raw_nick: str):
-                    target = self.screenshot_analyzer.normalize_nick(raw_nick)
-                    if not target:
-                        return None
-                    best_user_id = None
-                    best_score = 0.0
-                    for uid, p in pending_users.items():
-                        p_norm = self.screenshot_analyzer.normalize_nick(p.get('ingame_nick') or '')
-                        if not p_norm:
-                            continue
-                        score = SequenceMatcher(None, target, p_norm).ratio()
-                        if target in p_norm or p_norm in target:
-                            score = max(score, 0.95)
-                        if score > best_score:
-                            best_score = score
-                            best_user_id = uid
-                    if best_user_id and best_score >= 0.68:
-                        return pending_users[best_user_id]
+            left_raw = m.group(1).replace('@', '').strip()
+            right_raw = m.group(2).replace('@', '').strip()
+
+            def resolve_caption_user(raw_nick: str):
+                target = self.screenshot_analyzer.normalize_nick(raw_nick)
+                if not target:
                     return None
+                best_user_id = None
+                best_score = 0.0
+                for uid, p in pending_users.items():
+                    p_norm = self.screenshot_analyzer.normalize_nick(p.get('ingame_nick') or '')
+                    if not p_norm:
+                        continue
+                    score = SequenceMatcher(None, target, p_norm).ratio()
+                    if target in p_norm or p_norm in target:
+                        score = max(score, 0.95)
+                    if score > best_score:
+                        best_score = score
+                        best_user_id = uid
+                if best_user_id and best_score >= 0.68:
+                    return pending_users[best_user_id]
+                return None
 
-                cp1 = resolve_caption_user(left_raw)
-                cp2 = resolve_caption_user(right_raw)
-                if cp1 and cp2 and cp1['user_id'] != cp2['user_id']:
-                    cmatch = self.db.find_match_between_players(tournament['id'], cp1['user_id'], cp2['user_id'])
-                    if cmatch:
-                        caption_match = (cmatch, cp1, cp2)
+            cp1 = resolve_caption_user(left_raw)
+            cp2 = resolve_caption_user(right_raw)
+            if cp1 and cp2 and cp1['user_id'] != cp2['user_id']:
+                cmatch = self.db.find_match_between_players(tournament['id'], cp1['user_id'], cp2['user_id'])
+                if cmatch:
+                    return cmatch, cp1, cp2
+            return None
+
+        caption_match = resolve_match_by_text(caption)
+        if not caption_match:
+            hint_key = (chat_id, thread_id or 0, user_id)
+            hint = self.pending_match_hints.get(hint_key)
+            if hint and datetime.now().timestamp() - hint.get("ts", 0) <= 900:
+                caption_match = resolve_match_by_text(hint.get("text", ""))
+            elif hint:
+                self.pending_match_hints.pop(hint_key, None)
 
         if not caption_match:
             await self._send_results_reply(
@@ -1783,6 +1828,8 @@ class TournamentBot:
                 "Укажи подпись в формате: player1 - player2",
             )
             return
+
+        self.pending_match_hints.pop((chat_id, thread_id or 0, user_id), None)
 
         match, cp1, cp2 = caption_match
 
