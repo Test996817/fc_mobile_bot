@@ -1753,13 +1753,10 @@ class TournamentBot:
                 )
                 return
 
-        if is_admin:
-            pending_matches = [
-                m for m in self.db.get_tournament_matches(tournament['id'])
-                if m.get('status') == 'pending'
-            ]
-        else:
-            pending_matches = self.db.get_player_matches(user_id, tournament['id'], 'pending')
+        pending_matches = [
+            m for m in self.db.get_tournament_matches(tournament['id'])
+            if m.get('status') == 'pending'
+        ]
 
         if not pending_matches:
             await self._send_results_reply(
@@ -1771,11 +1768,13 @@ class TournamentBot:
             return
 
         pending_users = {}
+        pending_match_rows = []
         for m in pending_matches:
             p1 = self.db.get_player(m['player1_id'])
             p2 = self.db.get_player(m['player2_id'])
             if not p1 or not p2:
                 continue
+            pending_match_rows.append((m, p1, p2))
             pending_users[p1['user_id']] = p1
             pending_users[p2['user_id']] = p2
 
@@ -1790,6 +1789,34 @@ class TournamentBot:
 
             left_raw = m.group(1).replace('@', '').strip()
             right_raw = m.group(2).replace('@', '').strip()
+            left_norm = self.screenshot_analyzer.normalize_nick(left_raw)
+            right_norm = self.screenshot_analyzer.normalize_nick(right_raw)
+
+            if left_norm and right_norm:
+                best_candidate = None
+                best_total = 0.0
+                for pmatch, pp1, pp2 in pending_match_rows:
+                    p1_norm = self.screenshot_analyzer.normalize_nick(pp1.get('ingame_nick') or '')
+                    p2_norm = self.screenshot_analyzer.normalize_nick(pp2.get('ingame_nick') or '')
+                    if not p1_norm or not p2_norm:
+                        continue
+
+                    direct_total = SequenceMatcher(None, left_norm, p1_norm).ratio() + SequenceMatcher(None, right_norm, p2_norm).ratio()
+                    reverse_total = SequenceMatcher(None, left_norm, p2_norm).ratio() + SequenceMatcher(None, right_norm, p1_norm).ratio()
+
+                    if direct_total >= reverse_total:
+                        total = direct_total
+                        candidate = (pmatch, pp1, pp2)
+                    else:
+                        total = reverse_total
+                        candidate = (pmatch, pp2, pp1)
+
+                    if total > best_total:
+                        best_total = total
+                        best_candidate = candidate
+
+                if best_candidate and best_total >= 1.50:
+                    return best_candidate
 
             def resolve_caption_user(raw_nick: str):
                 target = self.screenshot_analyzer.normalize_nick(raw_nick)
@@ -1871,15 +1898,6 @@ class TournamentBot:
             self.pending_match_hints.pop(hint_key_used, None)
 
         match, cp1, cp2 = caption_match
-
-        if (not is_admin) and user_id not in (match['player1_id'], match['player2_id']):
-            await self._send_results_reply(
-                context,
-                chat_id,
-                output_thread_id,
-                "❌ Этот матч не относится к тебе. Отправь свой матч или используй /gresult.",
-            )
-            return
 
         recognized_scores = []
         unrecognized = []
