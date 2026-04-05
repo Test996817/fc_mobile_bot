@@ -99,7 +99,17 @@ class Database:
                             logger.warning(f"Database connection error: {e}. Reconnecting...")
                             self._db._reconnect()
                         else:
+                            try:
+                                self._db.conn.rollback()
+                            except Exception:
+                                pass
                             raise
+                    except psycopg2.Error:
+                        try:
+                            self._db.conn.rollback()
+                        except Exception:
+                            pass
+                        raise
             
             def fetchone(self):
                 return self._raw_cursor.fetchone()
@@ -139,10 +149,10 @@ class Database:
                 groups_count INTEGER DEFAULT 0,
                 created_by BIGINT NOT NULL,
                 playoff_message_id INTEGER,
-                topic_id INTEGER,
-                groups_topic_id INTEGER,
+                topic_id BIGINT,
+                groups_topic_id BIGINT,
                 groups_message_id INTEGER,
-                results_topic_id INTEGER,
+                results_topic_id BIGINT,
                 reg_message_id INTEGER,
                 groups_graphic_message_id INTEGER,
                 playoff_graphic_message_id INTEGER,
@@ -155,7 +165,7 @@ class Database:
             BEGIN
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
                                WHERE table_name='tournaments' AND column_name='topic_id') THEN
-                    ALTER TABLE tournaments ADD COLUMN topic_id INTEGER;
+                    ALTER TABLE tournaments ADD COLUMN topic_id BIGINT;
                 END IF;
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
                                WHERE table_name='tournaments' AND column_name='playoff_message_id') THEN
@@ -163,7 +173,7 @@ class Database:
                 END IF;
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
                                WHERE table_name='tournaments' AND column_name='groups_topic_id') THEN
-                    ALTER TABLE tournaments ADD COLUMN groups_topic_id INTEGER;
+                    ALTER TABLE tournaments ADD COLUMN groups_topic_id BIGINT;
                 END IF;
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
                                WHERE table_name='tournaments' AND column_name='groups_message_id') THEN
@@ -171,7 +181,7 @@ class Database:
                 END IF;
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
                                WHERE table_name='tournaments' AND column_name='results_topic_id') THEN
-                    ALTER TABLE tournaments ADD COLUMN results_topic_id INTEGER;
+                    ALTER TABLE tournaments ADD COLUMN results_topic_id BIGINT;
                 END IF;
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
                                WHERE table_name='tournaments' AND column_name='reg_message_id') THEN
@@ -185,6 +195,25 @@ class Database:
                                WHERE table_name='tournaments' AND column_name='playoff_graphic_message_id') THEN
                     ALTER TABLE tournaments ADD COLUMN playoff_graphic_message_id INTEGER;
                 END IF;
+            END
+            $$;
+        """)
+
+        self.cursor.execute("""
+            DO $$
+            BEGIN
+                BEGIN
+                    ALTER TABLE tournaments ALTER COLUMN topic_id TYPE BIGINT;
+                EXCEPTION WHEN others THEN NULL;
+                END;
+                BEGIN
+                    ALTER TABLE tournaments ALTER COLUMN groups_topic_id TYPE BIGINT;
+                EXCEPTION WHEN others THEN NULL;
+                END;
+                BEGIN
+                    ALTER TABLE tournaments ALTER COLUMN results_topic_id TYPE BIGINT;
+                EXCEPTION WHEN others THEN NULL;
+                END;
             END
             $$;
         """)
@@ -266,7 +295,7 @@ class Database:
         
         self.cursor.execute('''
             DO $$ BEGIN
-                ALTER TABLE tournaments ADD COLUMN groups_topic_id INTEGER;
+                ALTER TABLE tournaments ADD COLUMN groups_topic_id BIGINT;
             EXCEPTION WHEN others THEN NULL;
             END $$;
         ''')
@@ -280,7 +309,7 @@ class Database:
         
         self.cursor.execute('''
             DO $$ BEGIN
-                ALTER TABLE tournaments ADD COLUMN results_topic_id INTEGER;
+                ALTER TABLE tournaments ADD COLUMN results_topic_id BIGINT;
             EXCEPTION WHEN others THEN NULL;
             END $$;
         ''')
