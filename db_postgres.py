@@ -514,12 +514,16 @@ class Database:
         return [dict(row) for row in self.cursor.fetchall()]
     
     def create_match(self, tournament_id: int, player1_id: int, player2_id: int,
-                    round_num: int = 1) -> int:
+                    round_num: int = 1, group_name: str = None,
+                    match_type: str = 'round', deadline_days: int = 3) -> int:
+        deadline = datetime.now() + timedelta(days=deadline_days)
         self.cursor.execute('''
-            INSERT INTO matches (tournament_id, player1_id, player2_id, round_num)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO matches (tournament_id, player1_id, player2_id, round_num,
+                               group_name, match_type, deadline_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING id
-        ''', (tournament_id, player1_id, player2_id, round_num))
+        ''', (tournament_id, player1_id, player2_id, round_num,
+              group_name, match_type, deadline.isoformat()))
         self.conn.commit()
         return self.cursor.fetchone()['id']
     
