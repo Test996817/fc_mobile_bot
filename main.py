@@ -1003,6 +1003,10 @@ class TournamentBot:
             self.handle_results_topic_message
         ))
         self.application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.Regex(r'(?i)^\s*\+\s*рез\b'),
+            self.handle_gresult_text
+        ))
+        self.application.add_handler(MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.Regex(r'^\s*@?\S.{0,40}\s*(?:-|–|—|vs|VS)\s*@?\S.{0,40}\s*$'),
             self.handle_match_hint_message
         ))
@@ -1381,21 +1385,7 @@ class TournamentBot:
             f"✅ Таблица групп переотправлена в топик {topic_id or target_thread_id}."
         )
     
-    async def cmd_gresult(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.db.is_admin(update.effective_user.id):
-            await update.message.reply_text("❌ Команда /gresult доступна только админам.")
-            return
-        
-        if not context.args or len(context.args) < 3:
-            await update.message.reply_text(
-                "Использование: /gresult Player1 13-10 Player2"
-            )
-            return
-        
-        nick1 = context.args[0]
-        score_arg = context.args[1]
-        nick2 = context.args[2]
-        
+    async def _submit_gresult(self, update: Update, nick1: str, score_arg: str, nick2: str):
         score_match = re.match(r'(\d+)[-–:](\d+)', score_arg)
         if not score_match:
             await update.message.reply_text("Неверный формат счёта. Используйте: /gresult Player1 13-10 Player2")
@@ -1436,6 +1426,33 @@ class TournamentBot:
         await update.message.reply_text(
             f"✅ Результат записан: {nick1} {score1}:{score2} {nick2}"
         )
+
+    async def cmd_gresult(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not context.args or len(context.args) < 3:
+            await update.message.reply_text(
+                "Использование: /gresult Player1 13-10 Player2"
+            )
+            return
+
+        nick1 = context.args[0]
+        score_arg = context.args[1]
+        nick2 = context.args[2]
+        await self._submit_gresult(update, nick1, score_arg, nick2)
+
+    async def handle_gresult_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not update.message or not update.message.text:
+            return
+
+        text = update.message.text.strip()
+        match = re.match(r'(?i)^\+\s*рез\s+(\S+)\s+(\d+\s*[-–:]\s*\d+)\s+(\S+)\s*$', text)
+        if not match:
+            await update.message.reply_text("Использование: + рез Player1 13-10 Player2")
+            return
+
+        nick1 = match.group(1)
+        score_arg = re.sub(r'\s+', '', match.group(2))
+        nick2 = match.group(3)
+        await self._submit_gresult(update, nick1, score_arg, nick2)
     
     async def cmd_refresh_reg(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
