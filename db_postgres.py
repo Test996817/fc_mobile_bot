@@ -38,16 +38,76 @@ AVAILABLE_FORMATS: Dict[str, TournamentFormat] = {
 
 class Database:
     def __init__(self):
-        database_url = os.getenv("DATABASE_URL")
-        if database_url:
-            self.conn = psycopg2.connect(database_url, cursor_factory=RealDictCursor)
+        self._database_url = os.getenv("DATABASE_URL")
+        self._use_postgres = bool(self._database_url)
+        if self._use_postgres:
+            self._reconnect()
         else:
             self.conn = sqlite3.connect(
                 os.getenv("DB_PATH", "tournament_bot.db"), 
                 check_same_thread=False
             )
-        self.cursor = self.conn.cursor()
+        self._raw_cursor = self.conn.cursor()
         self.create_tables()
+    
+    def _reconnect(self):
+        if self._use_postgres:
+            self.conn = psycopg2.connect(self._database_url, cursor_factory=RealDictCursor)
+            self._raw_cursor = self.conn.cursor()
+            logger.info("Database reconnected successfully")
+    
+    def _execute_with_retry(self, query: str, params: tuple = None, retry_count: int = 3):
+        for attempt in range(retry_count):
+            try:
+                if params:
+                    self.cursor.execute(query, params)
+                else:
+                    self.cursor.execute(query)
+                return
+            except psycopg2.OperationalError as e:
+                if attempt < retry_count - 1:
+                    logger.warning(f"Database connection error: {e}. Reconnecting...")
+                    self._reconnect()
+                else:
+                    raise
+    
+    def __getattr__(self, name):
+        if name == 'cursor':
+            return self._cursor_with_retry
+        return super().__getattribute__(name)
+    
+    @property
+    def _cursor_with_retry(self):
+        class RetryCursor:
+            def __init__(self, db):
+                self._db = db
+            
+            @property
+            def _raw_cursor(self):
+                return self._db._raw_cursor
+            
+            def execute(self, query: str, params: tuple = None):
+                for attempt in range(3):
+                    try:
+                        if params:
+                            self._raw_cursor.execute(query, params)
+                        else:
+                            self._raw_cursor.execute(query)
+                        return
+                    except psycopg2.OperationalError as e:
+                        if attempt < 2:
+                            logger.warning(f"Database connection error: {e}. Reconnecting...")
+                            self._db._reconnect()
+                        else:
+                            raise
+            
+            def fetchone(self):
+                return self._raw_cursor.fetchone()
+            
+            def fetchall(self):
+                return self._raw_cursor.fetchall()
+        
+        return RetryCursor(self)
     
     def create_tables(self):
         self.cursor.execute('''
