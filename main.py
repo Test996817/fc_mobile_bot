@@ -1110,7 +1110,7 @@ class TournamentBot:
                     draws = p.get('draws', 0)
                     gs = p.get('goals_scored', 0)
                     gc = p.get('goals_conceded', 0)
-                    text += f"{nick} | {matches} | {wins} | {losses} | {draws} | {gs}:{gc}\n"
+                    text += f"{nick} | {matches} | {wins} | {losses} | {draws} | {gc}:{gs}\n"
             else:
                 text += "Пусто\n"
             
@@ -1136,7 +1136,7 @@ class TournamentBot:
                     gs = p.get('goals_scored', 0)
                     gc = p.get('goals_conceded', 0)
                     lines.append(
-                        f"{nick} — И {matches} | В {wins} | П {losses} | Н {draws} | ⚽ {gs}:{gc}"
+                        f"{nick} — И {matches} | В {wins} | П {losses} | Н {draws} | ⚽ {gc}:{gs}"
                     )
             else:
                 lines.append("Пусто")
