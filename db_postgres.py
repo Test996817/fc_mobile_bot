@@ -345,6 +345,12 @@ class Database:
         self.cursor.execute('UPDATE players SET ingame_nick = %s WHERE user_id = %s', 
                           (ingame_nick, user_id))
         self.conn.commit()
+
+    def reset_all_ratings(self, rating: int = 1000) -> int:
+        self.cursor.execute('UPDATE players SET rating = %s', (rating,))
+        affected = self._raw_cursor.rowcount if self._raw_cursor.rowcount is not None else 0
+        self.conn.commit()
+        return affected
     
     def add_admin(self, user_id: int):
         self.cursor.execute('INSERT INTO admins (user_id) VALUES (%s) ON CONFLICT DO NOTHING', (user_id,))

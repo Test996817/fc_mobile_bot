@@ -272,6 +272,12 @@ class Database:
         self.cursor.execute('UPDATE players SET ingame_nick = ? WHERE user_id = ?', 
                           (ingame_nick, user_id))
         self.conn.commit()
+
+    def reset_all_ratings(self, rating: int = 1000) -> int:
+        self.cursor.execute('UPDATE players SET rating = ?', (rating,))
+        affected = self.cursor.rowcount if self.cursor.rowcount is not None else 0
+        self.conn.commit()
+        return affected
     
     def add_admin(self, user_id: int):
         self.cursor.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (user_id,))
@@ -973,6 +979,7 @@ class TournamentBot:
         self.application.add_handler(CommandHandler("gresult", self.cmd_gresult))
         self.application.add_handler(CommandHandler("refreshreg", self.cmd_refresh_reg))
         self.application.add_handler(CommandHandler("regen_matches", self.cmd_regen_matches))
+        self.application.add_handler(CommandHandler("resetelo", self.cmd_resetelo))
         self.application.add_handler(CommandHandler("tinfo", self.cmd_tinfo))
         self.application.add_handler(CommandHandler("dbstats", self.cmd_dbstats))
         self.application.add_handler(CommandHandler("finalpost", self.cmd_finalpost))
@@ -1117,31 +1124,6 @@ class TournamentBot:
             text += "\n"
         
         return text.rstrip()
-
-    def generate_groups_table_html(self, tournament_id: int) -> str:
-        lines = ["🏆 <b>ГРУППОВОЙ ЭТАП</b>"]
-
-        for group_key in ['A', 'B', 'C', 'D']:
-            standings = self.db.get_group_standings(tournament_id, f"Группа {group_key}")
-            lines.append("")
-            lines.append(f"📊 <b>ГРУППА {group_key}</b>")
-
-            if standings:
-                for p in standings:
-                    nick = self._copyable_nick((p.get('ingame_nick') or '?')[:20])
-                    matches = p.get('matches_played', 0)
-                    wins = p.get('wins', 0)
-                    losses = p.get('losses', 0)
-                    draws = p.get('draws', 0)
-                    gs = p.get('goals_scored', 0)
-                    gc = p.get('goals_conceded', 0)
-                    lines.append(
-                        f"{nick} — И {matches} | В {wins} | П {losses} | Н {draws} | ⚽ {gc}:{gs}"
-                    )
-            else:
-                lines.append("Пусто")
-
-        return "\n".join(lines)
 
     def parse_visual_options(self, args: List[str]) -> Tuple[str, str, Optional[str]]:
         theme = "minimal"
@@ -1320,7 +1302,7 @@ class TournamentBot:
                     pass
     
     async def send_groups_table(self, chat_id: int, tournament_id: int, message_thread_id: int = None) -> Tuple[int, int]:
-        text = self.generate_groups_table_html(tournament_id)
+        text = self.as_monospace_block(self.generate_groups_table(tournament_id))
         
         try:
             send_kwargs = {
@@ -1347,7 +1329,7 @@ class TournamentBot:
             return 0, 0
     
     async def update_groups_table(self, chat_id: int, message_id: int, tournament_id: int):
-        text = self.generate_groups_table_html(tournament_id)
+        text = self.as_monospace_block(self.generate_groups_table(tournament_id))
         
         try:
             await self.application.bot.edit_message_text(
@@ -1362,7 +1344,7 @@ class TournamentBot:
             return False
 
     async def send_groups_table_message(self, chat_id: int, tournament_id: int, message_thread_id: int = None) -> int:
-        text = self.generate_groups_table_html(tournament_id)
+        text = self.as_monospace_block(self.generate_groups_table(tournament_id))
         try:
             kwargs = {
                 "chat_id": chat_id,
@@ -1442,30 +1424,42 @@ class TournamentBot:
             await update.message.reply_text("Нет ожидающего матча между этими игроками.")
             return
         
-        if score1 > score2:
-            winner_id = p1['user_id']
-        elif score2 > score1:
-            winner_id = p2['user_id']
+        entered_scores = {
+            p1['user_id']: score1,
+            p2['user_id']: score2,
+        }
+        match_score1 = entered_scores.get(match['player1_id'])
+        match_score2 = entered_scores.get(match['player2_id'])
+        if match_score1 is None or match_score2 is None:
+            await update.message.reply_text(
+                "❌ Введенная пара не соответствует участникам матча."
+            )
+            return
+
+        if match_score1 > match_score2:
+            winner_id = match['player1_id']
+        elif match_score2 > match_score1:
+            winner_id = match['player2_id']
         else:
             winner_id = None
 
         await self.process_match_result(
             match,
-            score1,
-            score2,
+            match_score1,
+            match_score2,
             winner_id,
             update.effective_user.id,
             send_notification=False,
         )
 
-        p1_new = self.db.get_player(match['player1_id'])
-        p2_new = self.db.get_player(match['player2_id'])
+        p1_new = self.db.get_player(p1['user_id'])
+        p2_new = self.db.get_player(p2['user_id'])
 
         p1_nick = self._copyable_nick(p1.get('ingame_nick'))
         p2_nick = self._copyable_nick(p2.get('ingame_nick'))
-        if winner_id == match['player1_id']:
+        if winner_id == p1['user_id']:
             winner_name = p1_nick
-        elif winner_id == match['player2_id']:
+        elif winner_id == p2['user_id']:
             winner_name = p2_nick
         else:
             winner_name = "Ничья"
@@ -1525,6 +1519,16 @@ class TournamentBot:
         
         await self.send_join_message(update.effective_chat.id, tournament['id'])
         await update.message.reply_text("✅ Сообщение с регистрацией обновлено!")
+
+    async def cmd_resetelo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        affected = self.db.reset_all_ratings(1000)
+        await update.message.reply_text(
+            f"✅ ELO сброшен до 1000 для {affected} игроков."
+        )
     
     async def cmd_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.message.chat.type == 'private':
@@ -2254,6 +2258,7 @@ class TournamentBot:
             "🎮 Команды управления матчами:\n"
             "/allmatches - все матчи\n"
             "/gresult Player1 13-10 Player2 - вручную результат\n"
+            "/resetelo - сбросить ELO всем до 1000\n"
             "/tp [ник] - тех. поражение\n"
             "/replace [old] [new] - замена\n"
             "/cancelmatch [ник1] [ник2] - отмена\n"
