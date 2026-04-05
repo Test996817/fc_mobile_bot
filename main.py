@@ -1020,12 +1020,15 @@ class TournamentBot:
 
     async def notify_admin(self, chat_id: int, message: str, message_thread_id: Optional[int] = None):
         try:
-            kwargs = {"chat_id": chat_id, "text": message}
+            kwargs = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
             if message_thread_id:
                 kwargs["message_thread_id"] = message_thread_id
             await self.application.bot.send_message(**kwargs)
         except Exception as e:
             logger.error(f"Failed to send admin notification: {e}")
+
+    def _copyable_nick(self, value: str) -> str:
+        return f"<code>{html.escape(value or '?')}</code>"
     
     async def cmd_commands(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
@@ -1385,7 +1388,7 @@ class TournamentBot:
             f"✅ Таблица групп переотправлена в топик {topic_id or target_thread_id}."
         )
     
-    async def _submit_gresult(self, update: Update, nick1: str, score_arg: str, nick2: str):
+    async def _submit_gresult(self, update: Update, context: ContextTypes.DEFAULT_TYPE, nick1: str, score_arg: str, nick2: str):
         score_match = re.match(r'(\d+)[-–:](\d+)', score_arg)
         if not score_match:
             await update.message.reply_text("Неверный формат счёта. Используйте: /gresult Player1 13-10 Player2")
@@ -1420,12 +1423,39 @@ class TournamentBot:
             winner_id = p2['user_id']
         else:
             winner_id = None
-        
-        await self.process_match_result(match, score1, score2, winner_id, update.effective_user.id)
-        
-        await update.message.reply_text(
-            f"✅ Результат записан: {nick1} {score1}:{score2} {nick2}"
+
+        await self.process_match_result(
+            match,
+            score1,
+            score2,
+            winner_id,
+            update.effective_user.id,
+            send_notification=False,
         )
+
+        p1_new = self.db.get_player(match['player1_id'])
+        p2_new = self.db.get_player(match['player2_id'])
+
+        p1_nick = self._copyable_nick(p1.get('ingame_nick'))
+        p2_nick = self._copyable_nick(p2.get('ingame_nick'))
+        if winner_id == match['player1_id']:
+            winner_name = p1_nick
+        elif winner_id == match['player2_id']:
+            winner_name = p2_nick
+        else:
+            winner_name = "Ничья"
+
+        p1_delta = p1_new['rating'] - p1['rating']
+        p2_delta = p2_new['rating'] - p2['rating']
+        text = (
+            f"✅ Матч #{match['id']}: {p1_nick} {score1}:{score2} {p2_nick}\n"
+            f"🏆 {winner_name}\n"
+            f"📈 ELO: {p1_nick} {p1['rating']}→{p1_new['rating']} ({p1_delta:+d}) | "
+            f"{p2_nick} {p2['rating']}→{p2_new['rating']} ({p2_delta:+d})"
+        )
+
+        output_thread_id = tournament.get('results_topic_id') or update.message.message_thread_id
+        await self._send_results_reply(context, update.effective_chat.id, output_thread_id, text)
 
     async def cmd_gresult(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.args or len(context.args) < 3:
@@ -1437,7 +1467,7 @@ class TournamentBot:
         nick1 = context.args[0]
         score_arg = context.args[1]
         nick2 = context.args[2]
-        await self._submit_gresult(update, nick1, score_arg, nick2)
+        await self._submit_gresult(update, context, nick1, score_arg, nick2)
 
     async def handle_gresult_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not update.message or not update.message.text:
@@ -1452,7 +1482,7 @@ class TournamentBot:
         nick1 = match.group(1)
         score_arg = re.sub(r'\s+', '', match.group(2))
         nick2 = match.group(3)
-        await self._submit_gresult(update, nick1, score_arg, nick2)
+        await self._submit_gresult(update, context, nick1, score_arg, nick2)
     
     async def cmd_refresh_reg(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
@@ -1740,7 +1770,7 @@ class TournamentBot:
             return
 
     async def _send_results_reply(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, thread_id: int, text: str):
-        kwargs = {"chat_id": chat_id, "text": text}
+        kwargs = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
         if thread_id:
             kwargs["message_thread_id"] = thread_id
         await context.bot.send_message(**kwargs)
@@ -2086,8 +2116,10 @@ class TournamentBot:
 
         p1 = self.db.get_player(match['player1_id'])
         p2 = self.db.get_player(match['player2_id'])
+        p1_nick = self._copyable_nick(p1.get('ingame_nick'))
+        p2_nick = self._copyable_nick(p2.get('ingame_nick'))
         per_screen = ", ".join([f"#{idx} {s1}:{s2}" for idx, s1, s2, _ in recognized_scores])
-        ocr_summary = f"✅ Результат записан (сумма игр): {p1['ingame_nick']} {p1_score}:{p2_score} {p2['ingame_nick']}"
+        ocr_summary = f"✅ Результат записан (сумма игр): {p1_nick} {p1_score}:{p2_score} {p2_nick}"
         ocr_summary += f"\nРаспознано скринов: {len(recognized_scores)}/{total}"
         if per_screen:
             ocr_summary += f"\nСчета по скринам: {per_screen}"
@@ -2127,16 +2159,21 @@ class TournamentBot:
         
         p1_new = self.db.get_player(match['player1_id'])
         p2_new = self.db.get_player(match['player2_id'])
+
+        p1_nick = self._copyable_nick(p1.get('ingame_nick'))
+        p2_nick = self._copyable_nick(p2.get('ingame_nick'))
+        p1_new_nick = self._copyable_nick(p1_new.get('ingame_nick'))
+        p2_new_nick = self._copyable_nick(p2_new.get('ingame_nick'))
         
-        winner_name = p1_new['ingame_nick'] if winner_id == match['player1_id'] else p2_new['ingame_nick'] if winner_id else "Ничья"
+        winner_name = p1_new_nick if winner_id == match['player1_id'] else p2_new_nick if winner_id else "Ничья"
         
         notification = (
             f"📊 Результат матча #{match['id']}\n\n"
-            f"{p1['ingame_nick']} {score1}:{score2} {p2['ingame_nick']}\n"
+            f"{p1_nick} {score1}:{score2} {p2_nick}\n"
             f"Победитель: {winner_name}\n\n"
             f"📈 Изменение ELO:\n"
-            f"{p1['ingame_nick']}: {p1['rating']} → {p1_new['rating']} ({'+' if p1_new['rating'] > p1['rating'] else ''}{p1_new['rating'] - p1['rating']})\n"
-            f"{p2['ingame_nick']}: {p2['rating']} → {p2_new['rating']} ({'+' if p2_new['rating'] > p2['rating'] else ''}{p2_new['rating'] - p2['rating']})"
+            f"{p1_nick}: {p1['rating']} → {p1_new['rating']} ({'+' if p1_new['rating'] > p1['rating'] else ''}{p1_new['rating'] - p1['rating']})\n"
+            f"{p2_nick}: {p2['rating']} → {p2_new['rating']} ({'+' if p2_new['rating'] > p2['rating'] else ''}{p2_new['rating'] - p2['rating']})"
         )
         
         tournament = self.db.get_tournament(match['tournament_id'])
