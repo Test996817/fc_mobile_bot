@@ -899,6 +899,7 @@ class TournamentBot:
         self.application.add_handler(CommandHandler("aihealth", self.cmd_aihealth))
         self.application.add_handler(CommandHandler("gtable", self.cmd_groups_graphic))
         self.application.add_handler(CommandHandler("pbracket", self.cmd_playoff_graphic))
+        self.application.add_handler(CommandHandler("resend_groups", self.cmd_resend_groups))
 
         self.application.add_handler(MessageHandler(
             filters.Regex(r'^!nick\s+(\S.+)'), 
@@ -1142,18 +1143,26 @@ class TournamentBot:
                 except Exception:
                     pass
     
-    async def send_groups_table(self, chat_id: int, tournament_id: int) -> Tuple[int, int]:
+    async def send_groups_table(self, chat_id: int, tournament_id: int, message_thread_id: int = None) -> Tuple[int, int]:
         text = self.generate_groups_table(tournament_id)
         
         try:
-            msg = await self.application.bot.send_message(
-                chat_id=chat_id,
-                text=text
-            )
-            topic_msg = await msg.reply_text("📋 Отправьте скриншоты сюда")
+            send_kwargs = {
+                "chat_id": chat_id,
+                "text": text,
+            }
+            if message_thread_id:
+                send_kwargs["message_thread_id"] = message_thread_id
+
+            msg = await self.application.bot.send_message(**send_kwargs)
+
+            reply_kwargs = {"text": "📋 Отправьте скриншоты сюда"}
+            if message_thread_id:
+                reply_kwargs["message_thread_id"] = message_thread_id
+            topic_msg = await msg.reply_text(**reply_kwargs)
             topic_id = topic_msg.message_thread_id
             
-            self.db.update_tournament_groups_info(tournament_id, chat_id, msg.message_id)
+            self.db.update_tournament_groups_info(tournament_id, topic_id or 0, msg.message_id)
             
             return topic_id, msg.message_id
         except Exception as e:
@@ -1171,6 +1180,39 @@ class TournamentBot:
             )
         except Exception as e:
             logger.error(f"Error updating groups table: {e}")
+
+    async def cmd_resend_groups(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        chat_id = update.effective_chat.id
+        tournament = self.db.get_tournament_by_chat(chat_id)
+
+        if not tournament:
+            await update.message.reply_text("Нет активного турнира.")
+            return
+
+        target_thread_id = tournament.get('results_topic_id') or update.message.message_thread_id
+        if not target_thread_id:
+            await update.message.reply_text(
+                "Не задан топик результатов. Отправьте 'RESULTS_TOPIC' в нужный топик."
+            )
+            return
+
+        topic_id, message_id = await self.send_groups_table(
+            chat_id,
+            tournament['id'],
+            message_thread_id=target_thread_id,
+        )
+
+        if not message_id:
+            await update.message.reply_text("❌ Не удалось переотправить таблицу групп.")
+            return
+
+        await update.message.reply_text(
+            f"✅ Таблица групп переотправлена в топик {topic_id or target_thread_id}."
+        )
     
     async def cmd_gresult(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
@@ -1931,7 +1973,11 @@ class TournamentBot:
                         text=f"🏆 Турнир '{tournament['name']}' начат!",
                         message_thread_id=results_topic_id
                     )
-                    await self.send_groups_table(chat_id, tournament['id'])
+                    await self.send_groups_table(
+                        chat_id,
+                        tournament['id'],
+                        message_thread_id=results_topic_id,
+                    )
                 except Exception as e:
                     logger.error(f"Error sending to results topic: {e}")
                     await update.message.reply_text(
