@@ -1058,16 +1058,29 @@ class TournamentBot:
             target_message_id = tournament.get("groups_graphic_message_id")
 
             if target_message_id:
-                with open(path, "rb") as img:
-                    media = InputMediaPhoto(
-                        media=img,
-                        caption=f"📊 Таблица групп ({theme}/{orientation})",
-                    )
-                    await self.application.bot.edit_message_media(
-                        chat_id=chat_id,
-                        message_id=target_message_id,
-                        media=media,
-                    )
+                try:
+                    with open(path, "rb") as img:
+                        media = InputMediaPhoto(
+                            media=img,
+                            caption=f"📊 Таблица групп ({theme}/{orientation})",
+                        )
+                        await self.application.bot.edit_message_media(
+                            chat_id=chat_id,
+                            message_id=target_message_id,
+                            media=media,
+                        )
+                except Exception as edit_err:
+                    logger.warning(f"Could not edit groups graphic message {target_message_id}: {edit_err}")
+                    if not create_if_missing:
+                        return False
+                    with open(path, "rb") as img:
+                        sent = await self.application.bot.send_photo(
+                            chat_id=chat_id,
+                            photo=img,
+                            caption=f"📊 Таблица групп ({theme}/{orientation})",
+                            message_thread_id=message_thread_id,
+                        )
+                    self.db.update_tournament_groups_graphic_message(tournament["id"], sent.message_id)
             else:
                 if not create_if_missing:
                     return False
@@ -1111,16 +1124,29 @@ class TournamentBot:
             target_message_id = tournament.get("playoff_graphic_message_id")
 
             if target_message_id:
-                with open(path, "rb") as img:
-                    media = InputMediaPhoto(
-                        media=img,
-                        caption=f"🏆 Сетка плей-офф ({theme}/{orientation})",
-                    )
-                    await self.application.bot.edit_message_media(
-                        chat_id=chat_id,
-                        message_id=target_message_id,
-                        media=media,
-                    )
+                try:
+                    with open(path, "rb") as img:
+                        media = InputMediaPhoto(
+                            media=img,
+                            caption=f"🏆 Сетка плей-офф ({theme}/{orientation})",
+                        )
+                        await self.application.bot.edit_message_media(
+                            chat_id=chat_id,
+                            message_id=target_message_id,
+                            media=media,
+                        )
+                except Exception as edit_err:
+                    logger.warning(f"Could not edit playoff graphic message {target_message_id}: {edit_err}")
+                    if not create_if_missing:
+                        return False
+                    with open(path, "rb") as img:
+                        sent = await self.application.bot.send_photo(
+                            chat_id=chat_id,
+                            photo=img,
+                            caption=f"🏆 Сетка плей-офф ({theme}/{orientation})",
+                            message_thread_id=message_thread_id,
+                        )
+                    self.db.update_tournament_playoff_graphic_message(tournament["id"], sent.message_id)
             else:
                 if not create_if_missing:
                     return False
