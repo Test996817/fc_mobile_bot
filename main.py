@@ -1118,6 +1118,31 @@ class TournamentBot:
         
         return text.rstrip()
 
+    def generate_groups_table_html(self, tournament_id: int) -> str:
+        lines = ["🏆 <b>ГРУППОВОЙ ЭТАП</b>"]
+
+        for group_key in ['A', 'B', 'C', 'D']:
+            standings = self.db.get_group_standings(tournament_id, f"Группа {group_key}")
+            lines.append("")
+            lines.append(f"📊 <b>ГРУППА {group_key}</b>")
+
+            if standings:
+                for p in standings:
+                    nick = self._copyable_nick((p.get('ingame_nick') or '?')[:20])
+                    matches = p.get('matches_played', 0)
+                    wins = p.get('wins', 0)
+                    losses = p.get('losses', 0)
+                    draws = p.get('draws', 0)
+                    gs = p.get('goals_scored', 0)
+                    gc = p.get('goals_conceded', 0)
+                    lines.append(
+                        f"{nick} — И {matches} | В {wins} | П {losses} | Н {draws} | ⚽ {gs}:{gc}"
+                    )
+            else:
+                lines.append("Пусто")
+
+        return "\n".join(lines)
+
     def parse_visual_options(self, args: List[str]) -> Tuple[str, str, Optional[str]]:
         theme = "minimal"
         orientation = "vertical"
@@ -1295,7 +1320,7 @@ class TournamentBot:
                     pass
     
     async def send_groups_table(self, chat_id: int, tournament_id: int, message_thread_id: int = None) -> Tuple[int, int]:
-        text = self.as_monospace_block(self.generate_groups_table(tournament_id))
+        text = self.generate_groups_table_html(tournament_id)
         
         try:
             send_kwargs = {
@@ -1322,7 +1347,7 @@ class TournamentBot:
             return 0, 0
     
     async def update_groups_table(self, chat_id: int, message_id: int, tournament_id: int):
-        text = self.as_monospace_block(self.generate_groups_table(tournament_id))
+        text = self.generate_groups_table_html(tournament_id)
         
         try:
             await self.application.bot.edit_message_text(
@@ -1337,7 +1362,7 @@ class TournamentBot:
             return False
 
     async def send_groups_table_message(self, chat_id: int, tournament_id: int, message_thread_id: int = None) -> int:
-        text = self.as_monospace_block(self.generate_groups_table(tournament_id))
+        text = self.generate_groups_table_html(tournament_id)
         try:
             kwargs = {
                 "chat_id": chat_id,
