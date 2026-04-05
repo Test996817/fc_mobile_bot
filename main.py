@@ -7,6 +7,7 @@ import re
 import random
 import asyncio
 import html
+import shutil
 
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta
@@ -756,14 +757,28 @@ class ScreenshotAnalyzer:
     def __init__(self):
         self.ocr_available = False
         self.max_plausible_score = self._load_max_plausible_score()
+        self._ocr_lang = "eng+rus"
         try:
             import pytesseract
             from PIL import Image
             self.pytesseract = pytesseract
             self.Image = Image
-            self.pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-            self.ocr_available = True
-            logger.info("OCR module loaded successfully")
+
+            env_cmd = os.getenv("TESSERACT_CMD", "").strip()
+            if env_cmd:
+                self.pytesseract.pytesseract.tesseract_cmd = env_cmd
+            else:
+                detected_cmd = shutil.which("tesseract")
+                if detected_cmd:
+                    self.pytesseract.pytesseract.tesseract_cmd = detected_cmd
+
+            try:
+                self.pytesseract.get_tesseract_version()
+                self.ocr_available = True
+                logger.info("OCR module loaded successfully")
+            except Exception as version_error:
+                self.ocr_available = False
+                logger.warning("OCR binary is unavailable: %s", version_error)
         except ImportError as e:
             logger.warning(f"OCR not available: {e}")
 
@@ -788,10 +803,18 @@ class ScreenshotAnalyzer:
             return ""
         try:
             image = self.Image.open(photo_path)
-            text = self.pytesseract.image_to_string(image, lang='eng+rus')
+            text = self.pytesseract.image_to_string(image, lang=self._ocr_lang)
             return text
         except Exception as e:
             logger.error(f"OCR error: {e}")
+            if self._ocr_lang != "eng":
+                try:
+                    image = self.Image.open(photo_path)
+                    text = self.pytesseract.image_to_string(image, lang="eng")
+                    self._ocr_lang = "eng"
+                    return text
+                except Exception:
+                    pass
             return ""
     
     def extract_scores(self, text: str) -> Tuple[Optional[int], Optional[int]]:
