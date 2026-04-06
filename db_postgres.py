@@ -351,6 +351,28 @@ class Database:
         affected = self._raw_cursor.rowcount if self._raw_cursor.rowcount is not None else 0
         self.conn.commit()
         return affected
+
+    def reset_all_player_stats_and_ratings(self, rating: int = 1000) -> int:
+        self.cursor.execute('''
+            UPDATE players
+            SET rating = %s,
+                wins = 0,
+                losses = 0,
+                draws = 0,
+                goals_scored = 0,
+                goals_conceded = 0
+        ''', (rating,))
+        affected = self._raw_cursor.rowcount if self._raw_cursor.rowcount is not None else 0
+        self.conn.commit()
+        return affected
+
+    def get_completed_matches_ordered(self) -> List[Dict]:
+        self.cursor.execute('''
+            SELECT * FROM matches
+            WHERE status = 'completed'
+            ORDER BY COALESCE(reported_at, created_at), id
+        ''')
+        return [dict(row) for row in self.cursor.fetchall()]
     
     def add_admin(self, user_id: int):
         self.cursor.execute('INSERT INTO admins (user_id) VALUES (%s) ON CONFLICT DO NOTHING', (user_id,))

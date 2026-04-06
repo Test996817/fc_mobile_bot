@@ -278,6 +278,28 @@ class Database:
         affected = self.cursor.rowcount if self.cursor.rowcount is not None else 0
         self.conn.commit()
         return affected
+
+    def reset_all_player_stats_and_ratings(self, rating: int = 1000) -> int:
+        self.cursor.execute('''
+            UPDATE players
+            SET rating = ?,
+                wins = 0,
+                losses = 0,
+                draws = 0,
+                goals_scored = 0,
+                goals_conceded = 0
+        ''', (rating,))
+        affected = self.cursor.rowcount if self.cursor.rowcount is not None else 0
+        self.conn.commit()
+        return affected
+
+    def get_completed_matches_ordered(self) -> List[Dict]:
+        self.cursor.execute('''
+            SELECT * FROM matches
+            WHERE status = 'completed'
+            ORDER BY COALESCE(reported_at, created_at), id
+        ''')
+        return [self._row_to_match(row) for row in self.cursor.fetchall()]
     
     def add_admin(self, user_id: int):
         self.cursor.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (user_id,))
@@ -980,6 +1002,7 @@ class TournamentBot:
         self.application.add_handler(CommandHandler("refreshreg", self.cmd_refresh_reg))
         self.application.add_handler(CommandHandler("regen_matches", self.cmd_regen_matches))
         self.application.add_handler(CommandHandler("resetelo", self.cmd_resetelo))
+        self.application.add_handler(CommandHandler("rewrite", self.cmd_rewrite_result))
         self.application.add_handler(CommandHandler("tinfo", self.cmd_tinfo))
         self.application.add_handler(CommandHandler("dbstats", self.cmd_dbstats))
         self.application.add_handler(CommandHandler("finalpost", self.cmd_finalpost))
@@ -1529,6 +1552,121 @@ class TournamentBot:
         affected = self.db.reset_all_ratings(1000)
         await update.message.reply_text(
             f"✅ ELO сброшен до 1000 для {affected} игроков."
+        )
+
+    def recalculate_player_stats_and_elo(self):
+        self.db.reset_all_player_stats_and_ratings(1000)
+        completed_matches = self.db.get_completed_matches_ordered()
+
+        for m in completed_matches:
+            score1 = m.get('player1_score')
+            score2 = m.get('player2_score')
+            if score1 is None or score2 is None:
+                continue
+
+            p1 = self.db.get_player(m['player1_id'])
+            p2 = self.db.get_player(m['player2_id'])
+            if not p1 or not p2:
+                continue
+
+            if m.get('winner_id') is None or score1 == score2:
+                result1 = result2 = 'draw'
+                change1 = 0
+                change2 = 0
+            elif m.get('winner_id') == m['player1_id']:
+                result1, result2 = 'win', 'loss'
+                new_r1, new_r2, _ = self.elo.calculate(p1['rating'], p2['rating'], 1.0)
+                change1 = new_r1 - p1['rating']
+                change2 = new_r2 - p2['rating']
+            else:
+                result1, result2 = 'loss', 'win'
+                new_r1, new_r2, _ = self.elo.calculate(p1['rating'], p2['rating'], 0.0)
+                change1 = new_r1 - p1['rating']
+                change2 = new_r2 - p2['rating']
+
+            self.db.update_player_stats(m['player1_id'], result1, score1, score2, change1)
+            self.db.update_player_stats(m['player2_id'], result2, score2, score1, change2)
+
+    async def cmd_rewrite_result(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        if len(context.args) < 3:
+            await update.message.reply_text("Использование: /rewrite Player1 13-10 Player2")
+            return
+
+        nick1 = context.args[0]
+        score_arg = context.args[1]
+        nick2 = context.args[2]
+
+        score_match = re.match(r'(\d+)[-–:](\d+)', score_arg)
+        if not score_match:
+            await update.message.reply_text("Неверный формат счёта. Используйте: /rewrite Player1 13-10 Player2")
+            return
+
+        score1 = int(score_match.group(1))
+        score2 = int(score_match.group(2))
+
+        tournament = self.db.get_tournament_by_chat(update.effective_chat.id)
+        if not tournament:
+            await update.message.reply_text("Нет активного турнира.")
+            return
+
+        p1 = self.db.get_player_by_nick(nick1)
+        p2 = self.db.get_player_by_nick(nick2)
+        if not p1 or not p2:
+            await update.message.reply_text("Один из игроков не найден.")
+            return
+
+        matches = self.db.get_tournament_matches(tournament['id'])
+        pair_matches = [
+            m for m in matches
+            if (
+                (m['player1_id'] == p1['user_id'] and m['player2_id'] == p2['user_id']) or
+                (m['player1_id'] == p2['user_id'] and m['player2_id'] == p1['user_id'])
+            )
+        ]
+
+        if not pair_matches:
+            await update.message.reply_text("Матч между этими игроками не найден.")
+            return
+
+        target_match = sorted(pair_matches, key=lambda m: m['id'], reverse=True)[0]
+        entered_scores = {
+            p1['user_id']: score1,
+            p2['user_id']: score2,
+        }
+        match_score1 = entered_scores.get(target_match['player1_id'])
+        match_score2 = entered_scores.get(target_match['player2_id'])
+
+        if match_score1 is None or match_score2 is None:
+            await update.message.reply_text("❌ Не удалось сопоставить счёт с участниками матча.")
+            return
+
+        if match_score1 > match_score2:
+            winner_id = target_match['player1_id']
+        elif match_score2 > match_score1:
+            winner_id = target_match['player2_id']
+        else:
+            winner_id = None
+
+        self.db.update_match_result(
+            target_match['id'],
+            match_score1,
+            match_score2,
+            winner_id,
+            update.effective_user.id,
+            target_match.get('screenshot_id'),
+        )
+        self.recalculate_player_stats_and_elo()
+
+        groups_message_id = tournament.get('groups_message_id')
+        if groups_message_id:
+            await self.update_groups_table(update.effective_chat.id, groups_message_id, tournament['id'])
+
+        await update.message.reply_text(
+            f"✅ Матч #{target_match['id']} перезаписан: {nick1} {score1}:{score2} {nick2}"
         )
     
     async def cmd_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2261,6 +2399,7 @@ class TournamentBot:
             "🎮 Команды управления матчами:\n"
             "/allmatches - все матчи\n"
             "/gresult Player1 13-10 Player2 - вручную результат\n"
+            "/rewrite Player1 13-10 Player2 - перезаписать матч\n"
             "/resetelo - сбросить ELO всем до 1000\n"
             "/tp [ник] - тех. поражение\n"
             "/replace [old] [new] - замена\n"
