@@ -1104,7 +1104,7 @@ class TournamentBot:
             
             text += f"📊 ГРУППА {group_key}\n"
             text += "━━━━━━━━━━━━━━━━━━━━\n"
-            text += "Игрок          | И | В | П | Н | Мячи\n"
+            text += "Игрок          | И | В | П | Н | О | Мячи\n"
             text += "━━━━━━━━━━━━━━━━━━━━\n"
             
             if standings:
@@ -1115,9 +1115,10 @@ class TournamentBot:
                     wins = p.get('wins', 0)
                     losses = p.get('losses', 0)
                     draws = p.get('draws', 0)
+                    points = p.get('points', 0)
                     gs = p.get('goals_scored', 0)
                     gc = p.get('goals_conceded', 0)
-                    text += f"{nick} | {matches} | {wins} | {losses} | {draws} | {gc}:{gs}\n"
+                    text += f"{nick} | {matches} | {wins} | {losses} | {draws} | {points} | {gs}:{gc}\n"
             else:
                 text += "Пусто\n"
             
@@ -2170,18 +2171,20 @@ class TournamentBot:
         if winner_id is None:
             result1 = result2 = 'draw'
             goals1 = goals2 = score1
-            rating_change = 0
+            change1 = 0
+            change2 = 0
         elif winner_id == match['player1_id']:
             result1, result2 = 'win', 'loss'
             goals1, goals2 = score1, score2
-            new_r1, new_r2, rating_change = self.elo.calculate(p1['rating'], p2['rating'], 1.0)
+            new_r1, new_r2, _ = self.elo.calculate(p1['rating'], p2['rating'], 1.0)
+            change1 = new_r1 - p1['rating']
+            change2 = new_r2 - p2['rating']
         else:
             result1, result2 = 'loss', 'win'
             goals1, goals2 = score1, score2
-            new_r1, new_r2, rating_change = self.elo.calculate(p1['rating'], p2['rating'], 0.0)
-        
-        change1 = rating_change if result1 == 'win' else -abs(rating_change)
-        change2 = -rating_change if result2 == 'win' else abs(rating_change)
+            new_r1, new_r2, _ = self.elo.calculate(p1['rating'], p2['rating'], 0.0)
+            change1 = new_r1 - p1['rating']
+            change2 = new_r2 - p2['rating']
         
         self.db.update_player_stats(match['player1_id'], result1, goals1, goals2, change1)
         self.db.update_player_stats(match['player2_id'], result2, goals2, goals1, change2)
