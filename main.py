@@ -511,14 +511,14 @@ class Database:
         self.cursor.execute('''
             UPDATE matches
             SET player1_id = ?
-            WHERE tournament_id = ? AND player1_id = ? AND status IN ('pending', 'in_progress')
+            WHERE tournament_id = ? AND player1_id = ?
         ''', (new_user_id, tournament_id, old_user_id))
         changed_p1 = self.cursor.rowcount if self.cursor.rowcount is not None else 0
 
         self.cursor.execute('''
             UPDATE matches
             SET player2_id = ?
-            WHERE tournament_id = ? AND player2_id = ? AND status IN ('pending', 'in_progress')
+            WHERE tournament_id = ? AND player2_id = ?
         ''', (new_user_id, tournament_id, old_user_id))
         changed_p2 = self.cursor.rowcount if self.cursor.rowcount is not None else 0
 
@@ -3424,27 +3424,28 @@ class TournamentBot:
             return
 
         old_participant = self.db.get_player_tournament_status(tournament['id'], old_player['user_id'])
-        if not old_participant or old_participant.get('tournament_status') != 'joined':
-            await update.message.reply_text(
-                f"Игрок '{old_nick}' не участвует в турнире '{tournament['name']}'."
-            )
-            return
-
         new_participant = self.db.get_player_tournament_status(tournament['id'], new_player['user_id'])
-        if new_participant:
-            await update.message.reply_text(
-                f"Игрок '{new_nick}' уже добавлен в турнир '{tournament['name']}'."
-            )
-            return
+        if old_participant and old_participant.get('tournament_status') == 'joined':
+            if new_participant:
+                await update.message.reply_text(
+                    f"Игрок '{new_nick}' уже добавлен в турнир '{tournament['name']}'."
+                )
+                return
 
-        replaced = self.db.replace_tournament_player(
-            tournament['id'],
-            old_player['user_id'],
-            new_player['user_id'],
-        )
-        if not replaced:
-            await update.message.reply_text("❌ Не удалось выполнить замену участника.")
-            return
+            replaced = self.db.replace_tournament_player(
+                tournament['id'],
+                old_player['user_id'],
+                new_player['user_id'],
+            )
+            if not replaced:
+                await update.message.reply_text("❌ Не удалось выполнить замену участника.")
+                return
+        else:
+            if not new_participant or new_participant.get('tournament_status') != 'joined':
+                await update.message.reply_text(
+                    f"Игрок '{old_nick}' не участвует в турнире '{tournament['name']}'."
+                )
+                return
 
         reassigned = self.db.reassign_open_matches_player(
             tournament['id'],
@@ -3458,8 +3459,7 @@ class TournamentBot:
 
         await update.message.reply_text(
             f"✅ Замена выполнена: {old_nick} → {new_nick}\n"
-            f"Обновлено незавершенных матчей: {reassigned}\n"
-            "Завершенные матчи не изменялись."
+            f"Обновлено матчей: {reassigned}"
         )
     
     async def cmd_cancel_match(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

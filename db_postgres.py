@@ -532,14 +532,14 @@ class Database:
         self.cursor.execute('''
             UPDATE matches
             SET player1_id = %s
-            WHERE tournament_id = %s AND player1_id = %s AND status IN ('pending', 'in_progress')
+            WHERE tournament_id = %s AND player1_id = %s
         ''', (new_user_id, tournament_id, old_user_id))
         changed_p1 = self._raw_cursor.rowcount if self._raw_cursor.rowcount is not None else 0
 
         self.cursor.execute('''
             UPDATE matches
             SET player2_id = %s
-            WHERE tournament_id = %s AND player2_id = %s AND status IN ('pending', 'in_progress')
+            WHERE tournament_id = %s AND player2_id = %s
         ''', (new_user_id, tournament_id, old_user_id))
         changed_p2 = self._raw_cursor.rowcount if self._raw_cursor.rowcount is not None else 0
 
