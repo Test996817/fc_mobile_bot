@@ -517,6 +517,34 @@ class Database:
             WHERE tournament_id = %s AND user_id = %s
         ''', (status, approved_by, tournament_id, user_id))
         self.conn.commit()
+
+    def replace_tournament_player(self, tournament_id: int, old_user_id: int, new_user_id: int) -> bool:
+        self.cursor.execute('''
+            UPDATE tournament_players
+            SET user_id = %s
+            WHERE tournament_id = %s AND user_id = %s
+        ''', (new_user_id, tournament_id, old_user_id))
+        changed = self._raw_cursor.rowcount if self._raw_cursor.rowcount is not None else 0
+        self.conn.commit()
+        return changed > 0
+
+    def reassign_open_matches_player(self, tournament_id: int, old_user_id: int, new_user_id: int) -> int:
+        self.cursor.execute('''
+            UPDATE matches
+            SET player1_id = %s
+            WHERE tournament_id = %s AND player1_id = %s AND status IN ('pending', 'in_progress')
+        ''', (new_user_id, tournament_id, old_user_id))
+        changed_p1 = self._raw_cursor.rowcount if self._raw_cursor.rowcount is not None else 0
+
+        self.cursor.execute('''
+            UPDATE matches
+            SET player2_id = %s
+            WHERE tournament_id = %s AND player2_id = %s AND status IN ('pending', 'in_progress')
+        ''', (new_user_id, tournament_id, old_user_id))
+        changed_p2 = self._raw_cursor.rowcount if self._raw_cursor.rowcount is not None else 0
+
+        self.conn.commit()
+        return changed_p1 + changed_p2
     
     def get_tournaments_by_chat(self, chat_id: int) -> List[Dict]:
         self.cursor.execute('''

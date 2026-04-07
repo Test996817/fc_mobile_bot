@@ -496,6 +496,34 @@ class Database:
             DELETE FROM tournament_players WHERE tournament_id = ? AND user_id = ?
         ''', (tournament_id, user_id))
         self.conn.commit()
+
+    def replace_tournament_player(self, tournament_id: int, old_user_id: int, new_user_id: int) -> bool:
+        self.cursor.execute('''
+            UPDATE tournament_players
+            SET user_id = ?
+            WHERE tournament_id = ? AND user_id = ?
+        ''', (new_user_id, tournament_id, old_user_id))
+        changed = self.cursor.rowcount if self.cursor.rowcount is not None else 0
+        self.conn.commit()
+        return changed > 0
+
+    def reassign_open_matches_player(self, tournament_id: int, old_user_id: int, new_user_id: int) -> int:
+        self.cursor.execute('''
+            UPDATE matches
+            SET player1_id = ?
+            WHERE tournament_id = ? AND player1_id = ? AND status IN ('pending', 'in_progress')
+        ''', (new_user_id, tournament_id, old_user_id))
+        changed_p1 = self.cursor.rowcount if self.cursor.rowcount is not None else 0
+
+        self.cursor.execute('''
+            UPDATE matches
+            SET player2_id = ?
+            WHERE tournament_id = ? AND player2_id = ? AND status IN ('pending', 'in_progress')
+        ''', (new_user_id, tournament_id, old_user_id))
+        changed_p2 = self.cursor.rowcount if self.cursor.rowcount is not None else 0
+
+        self.conn.commit()
+        return changed_p1 + changed_p2
     
     def create_match(self, tournament_id: int, player1_id: int, player2_id: int,
                    round_num: int = 1, group_name: str = None, 
@@ -3374,8 +3402,65 @@ class TournamentBot:
         if len(context.args) < 2:
             await update.message.reply_text("Использование: /replace [old_nick] [new_nick]")
             return
-        
-        await update.message.reply_text("Замена игрока выполнена.")
+
+        tournament = self.db.get_tournament_by_chat(update.effective_chat.id)
+        if not tournament:
+            await update.message.reply_text("Нет активного турнира в этом чате.")
+            return
+
+        old_nick = context.args[0]
+        new_nick = context.args[1]
+
+        old_player = self.db.get_player_by_nick(old_nick)
+        new_player = self.db.get_player_by_nick(new_nick)
+        if not old_player:
+            await update.message.reply_text(f"Игрок '{old_nick}' не найден.")
+            return
+        if not new_player:
+            await update.message.reply_text(f"Игрок '{new_nick}' не найден.")
+            return
+        if old_player['user_id'] == new_player['user_id']:
+            await update.message.reply_text("❌ Нельзя заменить игрока на самого себя.")
+            return
+
+        old_participant = self.db.get_player_tournament_status(tournament['id'], old_player['user_id'])
+        if not old_participant or old_participant.get('tournament_status') != 'joined':
+            await update.message.reply_text(
+                f"Игрок '{old_nick}' не участвует в турнире '{tournament['name']}'."
+            )
+            return
+
+        new_participant = self.db.get_player_tournament_status(tournament['id'], new_player['user_id'])
+        if new_participant:
+            await update.message.reply_text(
+                f"Игрок '{new_nick}' уже добавлен в турнир '{tournament['name']}'."
+            )
+            return
+
+        replaced = self.db.replace_tournament_player(
+            tournament['id'],
+            old_player['user_id'],
+            new_player['user_id'],
+        )
+        if not replaced:
+            await update.message.reply_text("❌ Не удалось выполнить замену участника.")
+            return
+
+        reassigned = self.db.reassign_open_matches_player(
+            tournament['id'],
+            old_player['user_id'],
+            new_player['user_id'],
+        )
+
+        groups_message_id = tournament.get('groups_message_id')
+        if groups_message_id:
+            await self.update_groups_table(update.effective_chat.id, groups_message_id, tournament['id'])
+
+        await update.message.reply_text(
+            f"✅ Замена выполнена: {old_nick} → {new_nick}\n"
+            f"Обновлено незавершенных матчей: {reassigned}\n"
+            "Завершенные матчи не изменялись."
+        )
     
     async def cmd_cancel_match(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
