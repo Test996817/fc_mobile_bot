@@ -2425,7 +2425,7 @@ class TournamentBot:
             "/tournament_start - начать турнир\n"
             "/tournament_end - завершить турнир\n\n"
             "🎮 Команды управления матчами:\n"
-            "/allmatches - все матчи\n"
+            "/allmatches - все оставшиеся матчи\n"
             "/gresult Player1 13-10 Player2 - вручную результат\n"
             "/rewrite Player1 13-10 Player2 - перезаписать матч\n"
             "/resetelo - сбросить ELO всем до 1000\n"
@@ -3240,27 +3240,70 @@ class TournamentBot:
             return
         
         matches = self.db.get_tournament_matches(tournament['id'])
-        
         pending = [m for m in matches if m['status'] == 'pending']
-        completed = [m for m in matches if m['status'] == 'completed']
-        
-        text = f"⚽ МАТЧИ '{tournament['name']}':\n\n"
-        
-        if pending:
-            text += f"⏳ Ожидают ({len(pending)}):\n"
-            for m in pending[:5]:
+
+        if not pending:
+            await update.message.reply_text(f"⚽ МАТЧИ '{tournament['name']}':\n\nОставшихся матчей нет.")
+            return
+
+        def player_tag(player: Optional[Dict]) -> str:
+            if not player:
+                return "?"
+            username = (player.get('username') or '').strip()
+            if username:
+                return f"@{username}"
+            fallback_nick = (player.get('ingame_nick') or '').strip()
+            return fallback_nick or "?"
+
+        grouped_matches = {}
+        for m in pending:
+            group_label = (m.get('group_name') or '').strip() or "Без группы"
+            grouped_matches.setdefault(group_label, []).append(m)
+
+        lines = [
+            f"⚽ ОСТАВШИЕСЯ МАТЧИ '{tournament['name']}':",
+            "",
+            f"⏳ Всего: {len(pending)}",
+            "",
+        ]
+
+        for group_name in sorted(grouped_matches.keys(), key=lambda g: (g == "Без группы", g)):
+            group_items = grouped_matches[group_name]
+            lines.append(f"📊 {group_name} ({len(group_items)}):")
+
+            for m in group_items:
                 p1 = self.db.get_player(m['player1_id'])
                 p2 = self.db.get_player(m['player2_id'])
-                text += f"  #{m['id']} {p1['ingame_nick']} vs {p2['ingame_nick']}\n"
-        
-        if completed:
-            text += f"\n✅ Завершены ({len(completed)}):\n"
-            for m in completed[-5:]:
-                p1 = self.db.get_player(m['player1_id'])
-                p2 = self.db.get_player(m['player2_id'])
-                text += f"  #{m['id']} {p1['ingame_nick']} {m['player1_score']}:{m['player2_score']} {p2['ingame_nick']}\n"
-        
-        await update.message.reply_text(text)
+                lines.append(f"{player_tag(p1)} vs {player_tag(p2)}")
+
+            lines.append("")
+
+        text = "\n".join(lines).rstrip()
+
+        max_len = 4000
+        if len(text) <= max_len:
+            await update.message.reply_text(text)
+            return
+
+        chunks = []
+        current = ""
+        for line in text.split("\n"):
+            candidate = f"{current}\n{line}" if current else line
+            if len(candidate) > max_len:
+                if current:
+                    chunks.append(current)
+                    current = line
+                else:
+                    chunks.append(line[:max_len])
+                    current = line[max_len:]
+            else:
+                current = candidate
+
+        if current:
+            chunks.append(current)
+
+        for chunk in chunks:
+            await update.message.reply_text(chunk)
     
     def create_next_knockout_round(self, tournament: Dict, current_round: int):
         matches = self.db.get_tournament_matches(tournament['id'], 'completed')
