@@ -804,18 +804,28 @@ class EloCalculator:
 
 class ScreenshotAnalyzer:
     def __init__(self):
-        self.tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
         self.logger = logging.getLogger(__name__)
         self.logger.info("OCR module initialized")
+        try:
+            import easyocr
+            self.reader = easyocr.Reader(['en', 'ru'], gpu=False, verbose=False)
+            self.ocr_available = True
+        except ImportError:
+            self.reader = None
+            self.ocr_available = False
     
     def extract_text(self, image_path: str) -> str:
-        import pytesseract
-        from PIL import Image
-        
+        if not self.ocr_available:
+            return ""
         try:
-            pytesseract.pytesseract.tesseract_cmd = self.tesseract_path
+            from PIL import Image
+            import cv2
+            import numpy as np
             image = Image.open(image_path)
-            text = pytesseract.image_to_string(image, lang='eng+rus')
+            image_np = np.array(image)
+            image_cv = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+            results = self.reader.readtext(image_cv)
+            text = ' '.join([item[1] for item in results])
             return text
         except Exception as e:
             self.logger.error(f"OCR error: {e}")

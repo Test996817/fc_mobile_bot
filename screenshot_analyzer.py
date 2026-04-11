@@ -4,6 +4,7 @@ Screenshot Analyzer for Universe of Heroes
 
 import logging
 import re
+import numpy as np
 from typing import Tuple
 
 logger = logging.getLogger(__name__)
@@ -12,15 +13,9 @@ logger = logging.getLogger(__name__)
 class ScreenshotAnalyzer:
     def __init__(self):
         self.ocr_available = False
-        self.pytesseract = None
-        self.Image = None
-        
         try:
-            import pytesseract
-            from PIL import Image
-            self.pytesseract = pytesseract
-            self.Image = Image
-            self.pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+            import easyocr
+            self.reader = easyocr.Reader(['en', 'ru'], gpu=False, verbose=False)
             self.ocr_available = True
             logger.info("OCR module loaded successfully")
         except ImportError as e:
@@ -30,8 +25,13 @@ class ScreenshotAnalyzer:
         if not self.ocr_available:
             return ""
         try:
-            image = self.Image.open(photo_path)
-            text = self.pytesseract.image_to_string(image, lang='eng+rus')
+            from PIL import Image
+            import cv2
+            image = Image.open(photo_path)
+            image_np = np.array(image)
+            image_cv = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+            results = self.reader.readtext(image_cv)
+            text = ' '.join([item[1] for item in results])
             return text
         except Exception as e:
             logger.error(f"OCR error: {e}")

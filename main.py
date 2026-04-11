@@ -9,6 +9,7 @@ import asyncio
 import html
 import shutil
 import unicodedata
+import numpy as np
 
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta
@@ -814,43 +815,11 @@ class ScreenshotAnalyzer:
     def __init__(self):
         self.ocr_available = False
         self.max_plausible_score = self._load_max_plausible_score()
-        self._ocr_lang = "eng+rus"
-        self._tesseract_cmd = None
         try:
-            import pytesseract
-            from PIL import Image
-            self.pytesseract = pytesseract
-            self.Image = Image
-
-            env_cmd = os.getenv("TESSERACT_CMD", "").strip()
-            if env_cmd:
-                if os.path.isabs(env_cmd):
-                    if os.path.exists(env_cmd):
-                        self._tesseract_cmd = env_cmd
-                    else:
-                        logger.warning("TESSERACT_CMD path does not exist: %s", env_cmd)
-                else:
-                    resolved_env_cmd = shutil.which(env_cmd)
-                    if resolved_env_cmd:
-                        self._tesseract_cmd = resolved_env_cmd
-                    else:
-                        logger.warning("TESSERACT_CMD binary is not found in PATH: %s", env_cmd)
-
-            if not self._tesseract_cmd:
-                detected_cmd = shutil.which("tesseract")
-                if detected_cmd:
-                    self._tesseract_cmd = detected_cmd
-
-            if self._tesseract_cmd:
-                self.pytesseract.pytesseract.tesseract_cmd = self._tesseract_cmd
-
-            try:
-                self.pytesseract.get_tesseract_version()
-                self.ocr_available = True
-                logger.info("OCR module loaded successfully")
-            except Exception as version_error:
-                self.ocr_available = False
-                logger.warning("OCR binary is unavailable: %s", version_error)
+            import easyocr
+            self.reader = easyocr.Reader(['en', 'ru'], gpu=False, verbose=False)
+            self.ocr_available = True
+            logger.info("OCR module loaded successfully")
         except ImportError as e:
             logger.warning(f"OCR not available: {e}")
 
@@ -874,25 +843,16 @@ class ScreenshotAnalyzer:
         if not self.ocr_available:
             return ""
         try:
-            if self._tesseract_cmd:
-                self.pytesseract.pytesseract.tesseract_cmd = self._tesseract_cmd
-            image = self.Image.open(photo_path)
-            text = self.pytesseract.image_to_string(image, lang=self._ocr_lang)
+            from PIL import Image
+            import cv2
+            image = Image.open(photo_path)
+            image_np = np.array(image)
+            image_cv = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+            results = self.reader.readtext(image_cv)
+            text = ' '.join([item[1] for item in results])
             return text
         except Exception as e:
             logger.error(f"OCR error: {e}")
-            if "not installed" in str(e) or "No such file or directory" in str(e):
-                self.ocr_available = False
-            if self._ocr_lang != "eng":
-                try:
-                    if self._tesseract_cmd:
-                        self.pytesseract.pytesseract.tesseract_cmd = self._tesseract_cmd
-                    image = self.Image.open(photo_path)
-                    text = self.pytesseract.image_to_string(image, lang="eng")
-                    self._ocr_lang = "eng"
-                    return text
-                except Exception:
-                    pass
             return ""
     
     def extract_scores(self, text: str) -> Tuple[Optional[int], Optional[int]]:
