@@ -2613,7 +2613,7 @@ class TournamentBot:
             "/cancelmatch <match_id> - отмена матча\n"
             "/notifyall - пинг по регистрации\n\n"
             "🏆 Плей-офф и визуал:\n"
-            "/playoff - генерация плей-офф\n"
+            "/playoff [ники...] - генерация плей-офф (+ ручной проход)\n"
             "/pw [стадия] [№] [ник] [счёт] - результат\n"
             "/gtable - таблица групп (моноширинный текст)\n"
             "/pbracket - сетка плей-офф (моноширинный текст)\n\n"
@@ -3828,28 +3828,111 @@ class TournamentBot:
             await update.message.reply_text("Нет активного турнира.")
             return
         
-        top_16 = []
+        forced_nicks = [arg.strip() for arg in context.args if arg.strip()]
+
+        def nick_key(value: str) -> str:
+            return (value or "").strip().casefold()
+
+        forced_lookup = {nick_key(n): n for n in forced_nicks}
+        applied_forced = []
+        not_found_forced = set(forced_lookup.values())
+
+        group_top4 = {}
         for group_key in ['A', 'B', 'C', 'D']:
             standings = self.db.get_group_standings(tournament['id'], f"Группа {group_key}")
-            if standings:
-                for p in standings[:4]:
-                    top_16.append(p)
-        
-        if len(top_16) < 16:
-            await update.message.reply_text(f"Недостаточно игроков. Нужно 16, есть {len(top_16)}.")
+            group_top = standings[:4] if standings else []
+
+            if forced_lookup and standings:
+                forced_in_group = []
+                for p in standings:
+                    key = nick_key(p.get('ingame_nick'))
+                    if key in forced_lookup:
+                        forced_in_group.append(p)
+
+                for forced_player in forced_in_group:
+                    forced_name = forced_player.get('ingame_nick')
+                    forced_name_key = nick_key(forced_name)
+                    if forced_name_key in forced_lookup:
+                        not_found_forced.discard(forced_lookup[forced_name_key])
+
+                    already_inside = any(
+                        nick_key(x.get('ingame_nick')) == forced_name_key
+                        for x in group_top
+                    )
+                    if already_inside:
+                        continue
+
+                    if len(group_top) >= 4:
+                        replace_idx = None
+                        for idx in range(len(group_top) - 1, -1, -1):
+                            current_key = nick_key(group_top[idx].get('ingame_nick'))
+                            if current_key not in forced_lookup:
+                                replace_idx = idx
+                                break
+
+                        if replace_idx is None:
+                            continue
+
+                        replaced = group_top[replace_idx]
+                        group_top[replace_idx] = forced_player
+                        applied_forced.append(
+                            (group_key, replaced.get('ingame_nick', '?'), forced_name)
+                        )
+                    else:
+                        group_top.append(forced_player)
+                        applied_forced.append((group_key, None, forced_name))
+
+            group_top4[group_key] = group_top
+
+        invalid_groups = [
+            f"Группа {group_key}: {len(group_top4.get(group_key, []))}/4"
+            for group_key in ['A', 'B', 'C', 'D']
+            if len(group_top4.get(group_key, [])) < 4
+        ]
+        if invalid_groups:
+            await update.message.reply_text(
+                "❌ Нельзя собрать 1/8: не хватает участников в группах.\n" + "\n".join(invalid_groups)
+            )
             return
+
+        def seed(group_key: str, place: int) -> Dict:
+            return group_top4[group_key][place - 1]
         
         self.db.clear_playoff_matches(tournament['id'])
         
-        for i in range(8):
-            p1 = top_16[i * 2]
-            p2 = top_16[i * 2 + 1]
-            self.db.add_playoff_match(tournament['id'], '1/8', i + 1, 
+        pairings = [
+            (seed('A', 1), seed('B', 4)),
+            (seed('C', 1), seed('D', 4)),
+            (seed('B', 2), seed('A', 3)),
+            (seed('D', 2), seed('C', 3)),
+            (seed('B', 1), seed('A', 4)),
+            (seed('D', 1), seed('C', 4)),
+            (seed('A', 2), seed('B', 3)),
+            (seed('C', 2), seed('D', 3)),
+        ]
+
+        for i, (p1, p2) in enumerate(pairings, start=1):
+            self.db.add_playoff_match(tournament['id'], '1/8', i,
                                      p1['ingame_nick'], p2['ingame_nick'])
         
         bracket_text = self.format_playoff_bracket(tournament['id'])
         
         msg = await update.message.reply_text(bracket_text, parse_mode='HTML', disable_web_page_preview=True)
+
+        if applied_forced:
+            lines = ["✅ Применены ручные проходы в плей-офф:"]
+            for group_key, replaced_nick, forced_nick in applied_forced:
+                if replaced_nick:
+                    lines.append(f"Группа {group_key}: {forced_nick} вместо {replaced_nick}")
+                else:
+                    lines.append(f"Группа {group_key}: добавлен {forced_nick}")
+            await update.message.reply_text("\n".join(lines))
+
+        if not_found_forced:
+            missing = ", ".join(sorted(not_found_forced))
+            await update.message.reply_text(
+                f"⚠️ Эти ники не найдены в группах текущего турнира: {missing}"
+            )
         
         self.db.cursor.execute(
             'UPDATE tournaments SET playoff_message_id = %s WHERE id = %s',
