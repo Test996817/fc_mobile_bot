@@ -478,6 +478,16 @@ class Database:
         self.cursor.execute('DELETE FROM matches WHERE tournament_id = %s', (tournament_id,))
         self.conn.commit()
     
+    def get_match_by_id(self, match_id: int) -> Optional[Dict]:
+        self.cursor.execute('SELECT * FROM matches WHERE id = %s', (match_id,))
+        row = self.cursor.fetchone()
+        return dict(row) if row else None
+    
+    def cancel_match(self, match_id: int) -> bool:
+        self.cursor.execute('DELETE FROM matches WHERE id = %s', (match_id,))
+        self.conn.commit()
+        return self.cursor.rowcount > 0
+    
     def update_tournament_groups_info(self, tournament_id: int, topic_id: int, message_id: int):
         self.cursor.execute('''
             UPDATE tournaments SET groups_topic_id = %s, groups_message_id = %s

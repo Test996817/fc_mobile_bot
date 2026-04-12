@@ -3510,11 +3510,36 @@ class TournamentBot:
             await update.message.reply_text("❌ Команда доступна только админам.")
             return
         
-        if len(context.args) < 2:
-            await update.message.reply_text("Использование: /cancelmatch [ник1] [ник2]")
+        if len(context.args) < 1:
+            await update.message.reply_text("Использование: /cancelmatch <match_id>")
             return
         
-        await update.message.reply_text("Матч отменён.")
+        try:
+            match_id = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("❌ Неверный формат match_id")
+            return
+        
+        match = self.db.get_match_by_id(match_id)
+        if not match:
+            await update.message.reply_text(f"❌ Матч #{match_id} не найден")
+            return
+        
+        tournament = self.db.get_tournament(match['tournament_id'])
+        if not tournament or tournament.get('chat_id') != update.effective_chat.id:
+            await update.message.reply_text(f"❌ Матч #{match_id} не принадлежит этому чату")
+            return
+        
+        player1 = self.db.get_player(match['player1_id'])
+        player2 = self.db.get_player(match['player2_id'])
+        p1_nick = player1.get('ingame_nick', '?') if player1 else '?'
+        p2_nick = player2.get('ingame_nick', '?') if player2 else '?'
+        
+        self.db.cancel_match(match_id)
+        
+        await update.message.reply_text(
+            f"✅ Матч #{match_id} ({p1_nick} vs {p2_nick}) отменён"
+        )
 
     async def cmd_notify_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
