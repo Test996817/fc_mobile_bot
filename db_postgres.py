@@ -218,6 +218,21 @@ class Database:
             $$;
         """)
         
+        self.cursor.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                               WHERE table_name='matches' AND column_name='player1_elo_before') THEN
+                    ALTER TABLE matches ADD COLUMN player1_elo_before INTEGER;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                               WHERE table_name='matches' AND column_name='player2_elo_before') THEN
+                    ALTER TABLE matches ADD COLUMN player2_elo_before INTEGER;
+                END IF;
+            END
+            $$;
+        """)
+        
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS tournament_players (
                 id SERIAL PRIMARY KEY,
@@ -248,7 +263,9 @@ class Database:
                 reported_by BIGINT,
                 reported_at TIMESTAMP,
                 deadline_at TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                player1_elo_before INTEGER,
+                player2_elo_before INTEGER
             )
         ''')
         
@@ -483,10 +500,31 @@ class Database:
         row = self.cursor.fetchone()
         return dict(row) if row else None
     
-    def cancel_match(self, match_id: int) -> bool:
+    def cancel_match(self, match_id: int) -> Tuple[bool, Optional[Dict], Optional[Dict]]:
+        match = self.get_match_by_id(match_id)
+        if not match:
+            return False, None, None
+        
+        p1_elo_before = match.get('player1_elo_before')
+        p2_elo_before = match.get('player2_elo_before')
+        
+        if p1_elo_before is not None:
+            self.cursor.execute(
+                'UPDATE players SET elo_rating = %s WHERE user_id = %s',
+                (p1_elo_before, match['player1_id'])
+            )
+        if p2_elo_before is not None:
+            self.cursor.execute(
+                'UPDATE players SET elo_rating = %s WHERE user_id = %s',
+                (p2_elo_before, match['player2_id'])
+            )
+        
         self.cursor.execute('DELETE FROM matches WHERE id = %s', (match_id,))
         self.conn.commit()
-        return self.cursor.rowcount > 0
+        
+        p1 = self.get_player(match['player1_id'])
+        p2 = self.get_player(match['player2_id'])
+        return True, p1, p2
     
     def update_tournament_groups_info(self, tournament_id: int, topic_id: int, message_id: int):
         self.cursor.execute('''
@@ -633,13 +671,31 @@ class Database:
     
     def update_match_result(self, match_id: int, score1: int, score2: int,
                           winner_id: int, reported_by: int, screenshot_id: str = None):
-        self.cursor.execute('''
-            UPDATE matches SET 
-            player1_score = %s, player2_score = %s, winner_id = %s,
-            status = 'completed', reported_by = %s, screenshot_id = %s,
-            reported_at = CURRENT_TIMESTAMP
-            WHERE id = %s
-        ''', (score1, score2, winner_id, reported_by, screenshot_id, match_id))
+        match = self.get_match_by_id(match_id)
+        if match:
+            p1_elo = match.get('player1_elo_before')
+            p2_elo = match.get('player2_elo_before')
+            if p1_elo is None:
+                p1 = self.get_player(match['player1_id'])
+                p2 = self.get_player(match['player2_id'])
+                p1_elo = p1.get('elo_rating', 0) if p1 else 0
+                p2_elo = p2.get('elo_rating', 0) if p2 else 0
+            self.cursor.execute('''
+                UPDATE matches SET 
+                player1_score = %s, player2_score = %s, winner_id = %s,
+                status = 'completed', reported_by = %s, screenshot_id = %s,
+                reported_at = CURRENT_TIMESTAMP,
+                player1_elo_before = %s, player2_elo_before = %s
+                WHERE id = %s
+            ''', (score1, score2, winner_id, reported_by, screenshot_id, p1_elo, p2_elo, match_id))
+        else:
+            self.cursor.execute('''
+                UPDATE matches SET 
+                player1_score = %s, player2_score = %s, winner_id = %s,
+                status = 'completed', reported_by = %s, screenshot_id = %s,
+                reported_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            ''', (score1, score2, winner_id, reported_by, screenshot_id, match_id))
         self.conn.commit()
     
     def find_match_between_players(self, tournament_id: int, user1_id: int, user2_id: int, 

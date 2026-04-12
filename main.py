@@ -3535,11 +3535,18 @@ class TournamentBot:
         p1_nick = player1.get('ingame_nick', '?') if player1 else '?'
         p2_nick = player2.get('ingame_nick', '?') if player2 else '?'
         
-        self.db.cancel_match(match_id)
+        success, player1, player2 = self.db.cancel_match(match_id)
         
-        await update.message.reply_text(
-            f"✅ Матч #{match_id} ({p1_nick} vs {p2_nick}) отменён"
-        )
+        if success:
+            p1_elo = player1.get('elo_rating') if player1 else '?'
+            p2_elo = player2.get('elo_rating') if player2 else '?'
+            
+            await update.message.reply_text(
+                f"✅ Матч #{match_id} ({p1_nick} vs {p2_nick}) отменён\n"
+                f"📈 ELO восстановлен: {p1_nick} → {p1_elo} | {p2_nick} → {p2_elo}"
+            )
+        else:
+            await update.message.reply_text(f"❌ Ошибка при отмене матча #{match_id}")
 
     async def cmd_notify_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
