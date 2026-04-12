@@ -593,6 +593,17 @@ class Database:
 
         self.conn.commit()
         return changed_p1 + changed_p2
+
+    def delete_open_matches_for_player(self, tournament_id: int, user_id: int) -> int:
+        self.cursor.execute('''
+            DELETE FROM matches
+            WHERE tournament_id = %s
+              AND (player1_id = %s OR player2_id = %s)
+              AND status IN ('pending', 'in_progress')
+        ''', (tournament_id, user_id, user_id))
+        deleted = self._raw_cursor.rowcount if self._raw_cursor.rowcount is not None else 0
+        self.conn.commit()
+        return deleted
     
     def get_tournaments_by_chat(self, chat_id: int) -> List[Dict]:
         self.cursor.execute('''

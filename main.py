@@ -524,6 +524,17 @@ class Database:
 
         self.conn.commit()
         return changed_p1 + changed_p2
+
+    def delete_open_matches_for_player(self, tournament_id: int, user_id: int) -> int:
+        self.cursor.execute('''
+            DELETE FROM matches
+            WHERE tournament_id = ?
+              AND (player1_id = ? OR player2_id = ?)
+              AND status IN ('pending', 'in_progress')
+        ''', (tournament_id, user_id, user_id))
+        deleted = self.cursor.rowcount if self.cursor.rowcount is not None else 0
+        self.conn.commit()
+        return deleted
     
     def create_match(self, tournament_id: int, player1_id: int, player2_id: int,
                    round_num: int = 1, group_name: str = None, 
@@ -1024,6 +1035,7 @@ class TournamentBot:
         self.application.add_handler(CommandHandler("elo", self.cmd_elo))
         self.application.add_handler(CommandHandler("tp", self.cmd_tech_loss))
         self.application.add_handler(CommandHandler("replace", self.cmd_replace))
+        self.application.add_handler(CommandHandler("removeplayer", self.cmd_remove_player))
         self.application.add_handler(CommandHandler("cancelmatch", self.cmd_cancel_match))
         self.application.add_handler(CommandHandler("notifyall", self.cmd_notify_all))
         self.application.add_handler(CommandHandler("gresult", self.cmd_gresult))
@@ -2431,7 +2443,8 @@ class TournamentBot:
             "/resetelo - сбросить ELO всем до 1000\n"
             "/tp [ник] - тех. поражение\n"
             "/replace [old] [new] - замена\n"
-            "/cancelmatch [ник1] [ник2] - отмена\n"
+            "/removeplayer <nick> - удалить участника\n"
+            "/cancelmatch <match_id> - отмена матча\n"
             "/notifyall - пинг по регистрации\n\n"
             "🏆 Плей-офф и визуал:\n"
             "/playoff - генерация плей-офф\n"
@@ -3504,7 +3517,50 @@ class TournamentBot:
             f"✅ Замена выполнена: {old_nick} → {new_nick}\n"
             f"Обновлено матчей: {reassigned}"
         )
-    
+
+    async def cmd_remove_player(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        if len(context.args) < 1:
+            await update.message.reply_text("Использование: /removeplayer <nick>")
+            return
+
+        tournament = self.db.get_tournament_by_chat(update.effective_chat.id)
+        if not tournament:
+            await update.message.reply_text("Нет активного турнира в этом чате.")
+            return
+
+        nick = context.args[0].strip()
+        player = self.db.get_player_by_nick(nick)
+        if not player:
+            await update.message.reply_text(f"Игрок '{nick}' не найден.")
+            return
+
+        participant = self.db.get_player_tournament_status(tournament['id'], player['user_id'])
+        if not participant:
+            await update.message.reply_text(
+                f"Игрок '{nick}' не участвует в турнире '{tournament['name']}'."
+            )
+            return
+
+        deleted_open_matches = self.db.delete_open_matches_for_player(
+            tournament['id'],
+            player['user_id'],
+        )
+        self.db.remove_player_from_tournament(tournament['id'], player['user_id'])
+
+        groups_message_id = tournament.get('groups_message_id')
+        if groups_message_id:
+            await self.update_groups_table(update.effective_chat.id, groups_message_id, tournament['id'])
+
+        await update.message.reply_text(
+            f"✅ Игрок '{nick}' удалён из турнира.\n"
+            f"Удалено открытых матчей: {deleted_open_matches}\n"
+            f"Completed-матчи сохранены."
+        )
+
     async def cmd_cancel_match(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
             await update.message.reply_text("❌ Команда доступна только админам.")
