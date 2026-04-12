@@ -504,26 +504,108 @@ class Database:
         match = self.get_match_by_id(match_id)
         if not match:
             return False, None, None
-        
-        p1_elo_before = match.get('player1_elo_before')
-        p2_elo_before = match.get('player2_elo_before')
-        
-        if p1_elo_before is not None:
-            self.cursor.execute(
-                'UPDATE players SET elo_rating = %s WHERE user_id = %s',
-                (p1_elo_before, match['player1_id'])
-            )
-        if p2_elo_before is not None:
-            self.cursor.execute(
-                'UPDATE players SET elo_rating = %s WHERE user_id = %s',
-                (p2_elo_before, match['player2_id'])
-            )
-        
-        self.cursor.execute('DELETE FROM matches WHERE id = %s', (match_id,))
+
+        was_completed = (match.get('status') == 'completed')
+        p1_score = int(match.get('player1_score') or 0)
+        p2_score = int(match.get('player2_score') or 0)
+        p1_id = match['player1_id']
+        p2_id = match['player2_id']
+
+        if was_completed:
+            winner_id = match.get('winner_id')
+            if winner_id is None or p1_score == p2_score:
+                self.cursor.execute(
+                    '''
+                    UPDATE players
+                    SET draws = GREATEST(draws - 1, 0),
+                        goals_scored = GREATEST(goals_scored - %s, 0),
+                        goals_conceded = GREATEST(goals_conceded - %s, 0)
+                    WHERE user_id = %s
+                    ''',
+                    (p1_score, p2_score, p1_id),
+                )
+                self.cursor.execute(
+                    '''
+                    UPDATE players
+                    SET draws = GREATEST(draws - 1, 0),
+                        goals_scored = GREATEST(goals_scored - %s, 0),
+                        goals_conceded = GREATEST(goals_conceded - %s, 0)
+                    WHERE user_id = %s
+                    ''',
+                    (p2_score, p1_score, p2_id),
+                )
+            elif winner_id == p1_id:
+                self.cursor.execute(
+                    '''
+                    UPDATE players
+                    SET wins = GREATEST(wins - 1, 0),
+                        goals_scored = GREATEST(goals_scored - %s, 0),
+                        goals_conceded = GREATEST(goals_conceded - %s, 0)
+                    WHERE user_id = %s
+                    ''',
+                    (p1_score, p2_score, p1_id),
+                )
+                self.cursor.execute(
+                    '''
+                    UPDATE players
+                    SET losses = GREATEST(losses - 1, 0),
+                        goals_scored = GREATEST(goals_scored - %s, 0),
+                        goals_conceded = GREATEST(goals_conceded - %s, 0)
+                    WHERE user_id = %s
+                    ''',
+                    (p2_score, p1_score, p2_id),
+                )
+            else:
+                self.cursor.execute(
+                    '''
+                    UPDATE players
+                    SET losses = GREATEST(losses - 1, 0),
+                        goals_scored = GREATEST(goals_scored - %s, 0),
+                        goals_conceded = GREATEST(goals_conceded - %s, 0)
+                    WHERE user_id = %s
+                    ''',
+                    (p1_score, p2_score, p1_id),
+                )
+                self.cursor.execute(
+                    '''
+                    UPDATE players
+                    SET wins = GREATEST(wins - 1, 0),
+                        goals_scored = GREATEST(goals_scored - %s, 0),
+                        goals_conceded = GREATEST(goals_conceded - %s, 0)
+                    WHERE user_id = %s
+                    ''',
+                    (p2_score, p1_score, p2_id),
+                )
+
+            p1_elo_before = match.get('player1_elo_before')
+            p2_elo_before = match.get('player2_elo_before')
+            if p1_elo_before is not None:
+                self.cursor.execute(
+                    'UPDATE players SET rating = %s WHERE user_id = %s',
+                    (p1_elo_before, p1_id)
+                )
+            if p2_elo_before is not None:
+                self.cursor.execute(
+                    'UPDATE players SET rating = %s WHERE user_id = %s',
+                    (p2_elo_before, p2_id)
+                )
+
+        self.cursor.execute('''
+            UPDATE matches
+            SET player1_score = NULL,
+                player2_score = NULL,
+                winner_id = NULL,
+                status = 'pending',
+                screenshot_id = NULL,
+                reported_by = NULL,
+                reported_at = NULL
+            WHERE id = %s
+        ''', (match_id,))
+
         self.conn.commit()
-        
-        p1 = self.get_player(match['player1_id'])
-        p2 = self.get_player(match['player2_id'])
+
+        p1 = self.get_player(p1_id)
+        p2 = self.get_player(p2_id)
         return True, p1, p2
     
     def update_tournament_groups_info(self, tournament_id: int, topic_id: int, message_id: int):
@@ -689,8 +771,8 @@ class Database:
             if p1_elo is None:
                 p1 = self.get_player(match['player1_id'])
                 p2 = self.get_player(match['player2_id'])
-                p1_elo = p1.get('elo_rating', 0) if p1 else 0
-                p2_elo = p2.get('elo_rating', 0) if p2 else 0
+                p1_elo = p1.get('rating', 0) if p1 else 0
+                p2_elo = p2.get('rating', 0) if p2 else 0
             self.cursor.execute('''
                 UPDATE matches SET 
                 player1_score = %s, player2_score = %s, winner_id = %s,

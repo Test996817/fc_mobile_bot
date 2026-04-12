@@ -188,9 +188,23 @@ class Database:
                 reported_by INTEGER,
                 reported_at TIMESTAMP,
                 deadline_at TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                player1_elo_before INTEGER,
+                player2_elo_before INTEGER
             )
         ''')
+
+        try:
+            self.cursor.execute('ALTER TABLE matches ADD COLUMN player1_elo_before INTEGER')
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            self.cursor.execute('ALTER TABLE matches ADD COLUMN player2_elo_before INTEGER')
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
         
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS admins (
@@ -556,6 +570,9 @@ class Database:
         if row:
             return self._row_to_match(row)
         return None
+
+    def get_match_by_id(self, match_id: int) -> Optional[Dict]:
+        return self.get_match(match_id)
     
     def get_tournament_matches(self, tournament_id: int, status: str = None) -> List[Dict]:
         query = 'SELECT * FROM matches WHERE tournament_id = ?'
@@ -614,19 +631,134 @@ class Database:
             'reported_by': row[12],
             'reported_at': row[13],
             'deadline_at': row[14],
-            'created_at': row[15]
+            'created_at': row[15],
+            'player1_elo_before': row[16] if len(row) > 16 else None,
+            'player2_elo_before': row[17] if len(row) > 17 else None,
         }
     
     def update_match_result(self, match_id: int, score1: int, score2: int, 
                           winner_id: int, reported_by: int, screenshot_id: str = None):
+        match = self.get_match(match_id)
+        p1_elo_before = None
+        p2_elo_before = None
+
+        if match:
+            p1_elo_before = match.get('player1_elo_before')
+            p2_elo_before = match.get('player2_elo_before')
+            if p1_elo_before is None:
+                p1 = self.get_player(match['player1_id'])
+                p2 = self.get_player(match['player2_id'])
+                p1_elo_before = p1.get('rating', 0) if p1 else 0
+                p2_elo_before = p2.get('rating', 0) if p2 else 0
+
         self.cursor.execute('''
             UPDATE matches 
             SET player1_score = ?, player2_score = ?, winner_id = ?,
                 status = 'completed', reported_by = ?, 
-                reported_at = CURRENT_TIMESTAMP, screenshot_id = ?
+                reported_at = CURRENT_TIMESTAMP, screenshot_id = ?,
+                player1_elo_before = ?, player2_elo_before = ?
             WHERE id = ?
-        ''', (score1, score2, winner_id, reported_by, screenshot_id, match_id))
+        ''', (score1, score2, winner_id, reported_by, screenshot_id, p1_elo_before, p2_elo_before, match_id))
         self.conn.commit()
+
+    def cancel_match(self, match_id: int) -> Tuple[bool, Optional[Dict], Optional[Dict]]:
+        match = self.get_match(match_id)
+        if not match:
+            return False, None, None
+
+        was_completed = (match.get('status') == 'completed')
+        p1_score = int(match.get('player1_score') or 0)
+        p2_score = int(match.get('player2_score') or 0)
+        p1_id = match['player1_id']
+        p2_id = match['player2_id']
+
+        if was_completed:
+            winner_id = match.get('winner_id')
+            if winner_id is None or p1_score == p2_score:
+                self.cursor.execute(
+                    '''
+                    UPDATE players
+                    SET draws = MAX(draws - 1, 0),
+                        goals_scored = MAX(goals_scored - ?, 0),
+                        goals_conceded = MAX(goals_conceded - ?, 0)
+                    WHERE user_id = ?
+                    ''',
+                    (p1_score, p2_score, p1_id),
+                )
+                self.cursor.execute(
+                    '''
+                    UPDATE players
+                    SET draws = MAX(draws - 1, 0),
+                        goals_scored = MAX(goals_scored - ?, 0),
+                        goals_conceded = MAX(goals_conceded - ?, 0)
+                    WHERE user_id = ?
+                    ''',
+                    (p2_score, p1_score, p2_id),
+                )
+            elif winner_id == p1_id:
+                self.cursor.execute(
+                    '''
+                    UPDATE players
+                    SET wins = MAX(wins - 1, 0),
+                        goals_scored = MAX(goals_scored - ?, 0),
+                        goals_conceded = MAX(goals_conceded - ?, 0)
+                    WHERE user_id = ?
+                    ''',
+                    (p1_score, p2_score, p1_id),
+                )
+                self.cursor.execute(
+                    '''
+                    UPDATE players
+                    SET losses = MAX(losses - 1, 0),
+                        goals_scored = MAX(goals_scored - ?, 0),
+                        goals_conceded = MAX(goals_conceded - ?, 0)
+                    WHERE user_id = ?
+                    ''',
+                    (p2_score, p1_score, p2_id),
+                )
+            else:
+                self.cursor.execute(
+                    '''
+                    UPDATE players
+                    SET losses = MAX(losses - 1, 0),
+                        goals_scored = MAX(goals_scored - ?, 0),
+                        goals_conceded = MAX(goals_conceded - ?, 0)
+                    WHERE user_id = ?
+                    ''',
+                    (p1_score, p2_score, p1_id),
+                )
+                self.cursor.execute(
+                    '''
+                    UPDATE players
+                    SET wins = MAX(wins - 1, 0),
+                        goals_scored = MAX(goals_scored - ?, 0),
+                        goals_conceded = MAX(goals_conceded - ?, 0)
+                    WHERE user_id = ?
+                    ''',
+                    (p2_score, p1_score, p2_id),
+                )
+
+            p1_elo_before = match.get('player1_elo_before')
+            p2_elo_before = match.get('player2_elo_before')
+            if p1_elo_before is not None:
+                self.cursor.execute('UPDATE players SET rating = ? WHERE user_id = ?', (p1_elo_before, p1_id))
+            if p2_elo_before is not None:
+                self.cursor.execute('UPDATE players SET rating = ? WHERE user_id = ?', (p2_elo_before, p2_id))
+
+        self.cursor.execute('''
+            UPDATE matches
+            SET player1_score = NULL,
+                player2_score = NULL,
+                winner_id = NULL,
+                status = 'pending',
+                screenshot_id = NULL,
+                reported_by = NULL,
+                reported_at = NULL
+            WHERE id = ?
+        ''', (match_id,))
+        self.conn.commit()
+
+        return True, self.get_player(p1_id), self.get_player(p2_id)
     
     def update_match_status(self, match_id: int, status: str):
         self.cursor.execute('UPDATE matches SET status = ? WHERE id = ?', (status, match_id))
@@ -1099,6 +1231,32 @@ class TournamentBot:
 
     def _copyable_nick(self, value: str) -> str:
         return f"<code>{html.escape(value or '?')}</code>"
+
+    def _display_nick(self, value: str) -> str:
+        return (value or '?').strip() or '?'
+
+    def _format_match_result_block(
+        self,
+        match_id: int,
+        p1_nick: str,
+        score1: int,
+        score2: int,
+        p2_nick: str,
+        winner_name: str,
+        p1_old_rating: int,
+        p1_new_rating: int,
+        p2_old_rating: int,
+        p2_new_rating: int,
+    ) -> str:
+        p1_delta = p1_new_rating - p1_old_rating
+        p2_delta = p2_new_rating - p2_old_rating
+        plain = (
+            f"✅ Матч #{match_id}: {p1_nick} {score1}:{score2} {p2_nick}\n"
+            f"🏆 {winner_name}\n"
+            f"📈 ELO: {p1_nick} {p1_old_rating}→{p1_new_rating} ({p1_delta:+d}) | "
+            f"{p2_nick} {p2_old_rating}→{p2_new_rating} ({p2_delta:+d})"
+        )
+        return self.as_monospace_block(plain)
     
     async def cmd_commands(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
@@ -1519,8 +1677,8 @@ class TournamentBot:
         p1_new = self.db.get_player(p1['user_id'])
         p2_new = self.db.get_player(p2['user_id'])
 
-        p1_nick = self._copyable_nick(p1.get('ingame_nick'))
-        p2_nick = self._copyable_nick(p2.get('ingame_nick'))
+        p1_nick = self._display_nick(p1.get('ingame_nick'))
+        p2_nick = self._display_nick(p2.get('ingame_nick'))
         if winner_id == p1['user_id']:
             winner_name = p1_nick
         elif winner_id == p2['user_id']:
@@ -1528,13 +1686,17 @@ class TournamentBot:
         else:
             winner_name = "Ничья"
 
-        p1_delta = p1_new['rating'] - p1['rating']
-        p2_delta = p2_new['rating'] - p2['rating']
-        text = (
-            f"✅ Матч #{match['id']}: {p1_nick} {score1}:{score2} {p2_nick}\n"
-            f"🏆 {winner_name}\n"
-            f"📈 ELO: {p1_nick} {p1['rating']}→{p1_new['rating']} ({p1_delta:+d}) | "
-            f"{p2_nick} {p2['rating']}→{p2_new['rating']} ({p2_delta:+d})"
+        text = self._format_match_result_block(
+            match_id=match['id'],
+            p1_nick=p1_nick,
+            score1=score1,
+            score2=score2,
+            p2_nick=p2_nick,
+            winner_name=winner_name,
+            p1_old_rating=p1['rating'],
+            p1_new_rating=p1_new['rating'],
+            p2_old_rating=p2['rating'],
+            p2_new_rating=p2_new['rating'],
         )
 
         output_thread_id = tournament.get('results_topic_id') or update.message.message_thread_id
@@ -2370,20 +2532,24 @@ class TournamentBot:
         p1_new = self.db.get_player(match['player1_id'])
         p2_new = self.db.get_player(match['player2_id'])
 
-        p1_nick = self._copyable_nick(p1.get('ingame_nick'))
-        p2_nick = self._copyable_nick(p2.get('ingame_nick'))
-        p1_new_nick = self._copyable_nick(p1_new.get('ingame_nick'))
-        p2_new_nick = self._copyable_nick(p2_new.get('ingame_nick'))
-        
+        p1_nick = self._display_nick(p1.get('ingame_nick'))
+        p2_nick = self._display_nick(p2.get('ingame_nick'))
+        p1_new_nick = self._display_nick(p1_new.get('ingame_nick'))
+        p2_new_nick = self._display_nick(p2_new.get('ingame_nick'))
+
         winner_name = p1_new_nick if winner_id == match['player1_id'] else p2_new_nick if winner_id else "Ничья"
-        
-        notification = (
-            f"📊 Результат матча #{match['id']}\n\n"
-            f"{p1_nick} {score1}:{score2} {p2_nick}\n"
-            f"Победитель: {winner_name}\n\n"
-            f"📈 Изменение ELO:\n"
-            f"{p1_nick}: {p1['rating']} → {p1_new['rating']} ({'+' if p1_new['rating'] > p1['rating'] else ''}{p1_new['rating'] - p1['rating']})\n"
-            f"{p2_nick}: {p2['rating']} → {p2_new['rating']} ({'+' if p2_new['rating'] > p2['rating'] else ''}{p2_new['rating'] - p2['rating']})"
+
+        notification = self._format_match_result_block(
+            match_id=match['id'],
+            p1_nick=p1_nick,
+            score1=score1,
+            score2=score2,
+            p2_nick=p2_nick,
+            winner_name=winner_name,
+            p1_old_rating=p1['rating'],
+            p1_new_rating=p1_new['rating'],
+            p2_old_rating=p2['rating'],
+            p2_new_rating=p2_new['rating'],
         )
         
         tournament = self.db.get_tournament(match['tournament_id'])
@@ -3594,12 +3760,13 @@ class TournamentBot:
         success, player1, player2 = self.db.cancel_match(match_id)
         
         if success:
-            p1_elo = player1.get('elo_rating') if player1 else '?'
-            p2_elo = player2.get('elo_rating') if player2 else '?'
+            p1_elo = player1.get('rating') if player1 else '?'
+            p2_elo = player2.get('rating') if player2 else '?'
             
             await update.message.reply_text(
-                f"✅ Матч #{match_id} ({p1_nick} vs {p2_nick}) отменён\n"
-                f"📈 ELO восстановлен: {p1_nick} → {p1_elo} | {p2_nick} → {p2_elo}"
+                f"✅ Результат матча #{match_id} ({p1_nick} vs {p2_nick}) снят\n"
+                f"🕓 Матч снова в статусе pending\n"
+                f"📈 ELO: {p1_nick} → {p1_elo} | {p2_nick} → {p2_elo}"
             )
         else:
             await update.message.reply_text(f"❌ Ошибка при отмене матча #{match_id}")
