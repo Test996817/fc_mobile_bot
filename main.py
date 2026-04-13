@@ -1617,35 +1617,121 @@ class TournamentBot:
             f"✅ Таблица групп переотправлена в топик {topic_id or target_thread_id}."
         )
     
+    async def _submit_playoff_result(self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                      tournament: Dict, nick1: str, score1: int, score2: int, nick2: str):
+        if score1 == score2:
+            await update.message.reply_text("❌ Ничья невозможна в плей-офф.")
+            return
+
+        def nick_key(n: str) -> str:
+            return (n or "").strip().casefold()
+
+        n1_key = nick_key(nick1)
+        n2_key = nick_key(nick2)
+
+        all_stages = ['1/8', '1/4', '1/2', 'bronze', 'final']
+        found = []
+
+        for stage in all_stages:
+            matches = self.db.get_playoff_matches(tournament['id'], stage)
+            for m in matches:
+                if m.get('status') not in ('pending', 'in_progress'):
+                    continue
+                p1_nick = m.get('player1_nick') or ''
+                p2_nick = m.get('player2_nick') or ''
+                m1_key = nick_key(p1_nick)
+                m2_key = nick_key(p2_nick)
+                if (m1_key == n1_key and m2_key == n2_key) or (m1_key == n2_key and m2_key == n1_key):
+                    found.append((stage, m))
+
+        if not found:
+            await update.message.reply_text("Нет ожидающего playoff-матча между этими игроками.")
+            return
+
+        if len(found) > 1:
+            lines = ["⚠️ Найдено несколько матчей. Используй /pw:"]
+            for stage, m in found:
+                lines.append(f"/pw {stage} {m['match_num']} ...")
+            await update.message.reply_text("\n".join(lines))
+            return
+
+        stage, playoff_match = found[0]
+        wins_needed = 3 if stage in ('1/8', '1/4') else 4
+
+        if nick_key(playoff_match.get('player1_nick') or '') == n1_key:
+            p1_wins = score1
+            p2_wins = score2
+        else:
+            p1_wins = score2
+            p2_wins = score1
+
+        status = 'completed' if (p1_wins >= wins_needed or p2_wins >= wins_needed) else 'in_progress'
+
+        self.db.update_playoff_match(playoff_match['id'], p1_wins, p2_wins, status)
+
+        winner_nick = playoff_match['player1_nick'] if p1_wins > p2_wins else playoff_match['player2_nick']
+        loser_nick = playoff_match['player2_nick'] if p1_wins > p2_wins else playoff_match['player1_nick']
+
+        if status == 'completed':
+            self.advance_playoff(tournament['id'], stage, playoff_match['match_num'], winner_nick, loser_nick)
+
+        bracket_text = self.format_playoff_bracket(tournament['id'])
+
+        if tournament.get('playoff_message_id'):
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=tournament['chat_id'],
+                    message_id=tournament['playoff_message_id'],
+                    text=bracket_text,
+                    parse_mode='HTML',
+                    disable_web_page_preview=True
+                )
+            except Exception as e:
+                logger.error(f"Error editing playoff bracket: {e}")
+
+        result_text = f"✅ Записан результат {stage} #{playoff_match['match_num']}:\n"
+        result_text += f"{playoff_match['player1_nick']} {p1_wins}-{p2_wins} {playoff_match['player2_nick']}\n"
+        if status == 'completed':
+            if stage == 'final':
+                result_text += f"\n🏆 {winner_nick} — чемпион турнира!"
+            elif stage == 'bronze':
+                result_text += f"\n🥉 {winner_nick} занимает 3 место!"
+            else:
+                result_text += f"\n🏆 {winner_nick} проходит в следующий раунд!"
+        else:
+            result_text += f"\n⏳ {wins_needed} побед для прохода. Текущий счёт: {p1_wins}-{p2_wins}"
+
+        await update.message.reply_text(result_text)
+
     async def _submit_gresult(self, update: Update, context: ContextTypes.DEFAULT_TYPE, nick1: str, score_arg: str, nick2: str):
         score_match = re.match(r'(\d+)[-–:](\d+)', score_arg)
         if not score_match:
             await update.message.reply_text("Неверный формат счёта. Используйте: /gresult Player1 13-10 Player2")
             return
-        
+
         score1 = int(score_match.group(1))
         score2 = int(score_match.group(2))
-        
+
         tournament = self.db.get_tournament_by_chat(update.effective_chat.id)
         if not tournament:
             await update.message.reply_text("Нет активного турнира.")
             return
-        
+
         p1 = self.db.get_player_by_nick(nick1)
         p2 = self.db.get_player_by_nick(nick2)
-        
+
         if not p1:
             await update.message.reply_text(f"Игрок '{nick1}' не найден.")
             return
         if not p2:
             await update.message.reply_text(f"Игрок '{nick2}' не найден.")
             return
-        
+
         match = self.db.find_match_between_players(tournament['id'], p1['user_id'], p2['user_id'])
         if not match:
-            await update.message.reply_text("Нет ожидающего матча между этими игроками.")
+            await self._submit_playoff_result(update, context, tournament, nick1, score1, score2, nick2)
             return
-        
+
         entered_scores = {
             p1['user_id']: score1,
             p2['user_id']: score2,
@@ -2604,7 +2690,7 @@ class TournamentBot:
             "/tournament_end - завершить турнир\n\n"
             "🎮 Команды управления матчами:\n"
             "/allmatches - все оставшиеся матчи\n"
-            "/gresult Player1 13-10 Player2 - вручную результат\n"
+            "/gresult Player1 13-10 Player2 - вручную результат (группы + плей-офф)\n"
             "/rewrite Player1 13-10 Player2 - перезаписать матч\n"
             "/resetelo - сбросить ELO всем до 1000\n"
             "/tp [ник] - тех. поражение\n"
