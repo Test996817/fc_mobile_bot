@@ -1,3 +1,9 @@
+import logging
+from typing import Tuple
+
+logger = logging.getLogger(__name__)
+
+
 class EloCalculator:
     K_FACTOR = 32
     

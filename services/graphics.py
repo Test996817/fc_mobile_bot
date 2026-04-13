@@ -1,3 +1,10 @@
+import logging
+import os
+from typing import Dict, List, Tuple
+
+logger = logging.getLogger(__name__)
+
+
 import os
 import unicodedata
 from datetime import datetime
