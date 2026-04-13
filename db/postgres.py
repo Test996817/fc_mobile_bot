@@ -1026,53 +1026,6 @@ class Database:
     
     def close(self):
         self.conn.close()
-
-
-class EloCalculator:
-    K_FACTOR = 32
-    
-    def calculate(self, rating_a: int, rating_b: int, score_a: float) -> Tuple[int, int, int]:
-        expected_a = 1 / (1 + 10 ** ((rating_b - rating_a) / 400))
-        change = int(self.K_FACTOR * (score_a - expected_a))
-        new_a = rating_a + change
-        new_b = rating_b - change
-        return new_a, new_b, abs(change)
-
-
-class ScreenshotAnalyzer:
-    def __init__(self):
-        self.tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-        self.logger = logging.getLogger(__name__)
-        self.logger.info("OCR module initialized")
-    
-    def extract_text(self, image_path: str) -> str:
-        import pytesseract
-        from PIL import Image
-        
-        try:
-            pytesseract.pytesseract.tesseract_cmd = self.tesseract_path
-            image = Image.open(image_path)
-            text = pytesseract.image_to_string(image, lang='eng+rus')
-            return text
-        except Exception as e:
-            self.logger.error(f"OCR error: {e}")
-            return ""
-    
-    def extract_scores(self, text: str) -> Tuple[Optional[int], Optional[int]]:
-        import re
-        
-        patterns = [
-            r'(\d{1,2})\s*[-:]\s*(\d{1,2})',
-            r'(\d{1,2})\s*[-:]\s*(\d{1,2})',
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, text)
-            if match:
-                return int(match.group(1)), int(match.group(2))
-        
-        return None, None
-
     def delete_tournament(self, tournament_id: int):
         self.cursor.execute('DELETE FROM matches WHERE tournament_id = %s', (tournament_id,))
         self.cursor.execute('DELETE FROM playoff_matches WHERE tournament_id = %s', (tournament_id,))
@@ -1085,7 +1038,4 @@ class ScreenshotAnalyzer:
         self.cursor.execute('DELETE FROM playoff_matches')
         self.cursor.execute('DELETE FROM tournament_players')
         self.cursor.execute('DELETE FROM tournaments')
-        self.cursor.execute("SELECT setval('tournaments_id_seq', 1, false)")
-        self.cursor.execute("SELECT setval('matches_id_seq', 1, false)")
-        self.cursor.execute("SELECT setval('playoff_matches_id_seq', 1, false)")
         self.conn.commit()
