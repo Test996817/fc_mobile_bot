@@ -81,6 +81,7 @@ class TournamentBot:
         self.application.add_handler(CommandHandler("gtable", self.cmd_groups_graphic))
         self.application.add_handler(CommandHandler("pbracket", self.cmd_playoff_graphic))
         self.application.add_handler(CommandHandler("resend_groups", self.cmd_resend_groups))
+        self.application.add_handler(CommandHandler("undo_playoff", self.cmd_undo_playoff))
 
         self.application.add_handler(MessageHandler(
             filters.Regex(r'^!nick\s+(\S.+)'), 
@@ -1579,6 +1580,7 @@ class TournamentBot:
             "🏆 Плей-офф и визуал:\n"
             "/playoff [ники...] - генерация плей-офф (+ ручной проход)\n"
             "/pw [стадия] [№] [ник] [счёт] - результат\n"
+            "/undo_playoff [стадия] [№] - откатить результат\n"
             "/gtable - таблица групп (моноширинный текст)\n"
             "/pbracket - сетка плей-офф (моноширинный текст)\n\n"
             "📊 Аналитика и сервис:\n"
@@ -2158,6 +2160,76 @@ class TournamentBot:
         )
         if not sent_message_id:
             await update.message.reply_text("❌ Не удалось отправить таблицу групп.")
+
+    async def cmd_undo_playoff(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Команда доступна только админам.")
+            return
+
+        if not context.args or len(context.args) < 2:
+            await update.message.reply_text(
+                "Использование: /undo_playoff [стадия] [№]\n"
+                "Пример: /undo_playoff 1/8 3"
+            )
+            return
+
+        stage = context.args[0]
+        try:
+            match_num = int(context.args[1])
+        except ValueError:
+            await update.message.reply_text("Номер матча должен быть числом.")
+            return
+
+        tournament = self.db.get_tournament_by_chat(update.effective_chat.id)
+        if not tournament:
+            await update.message.reply_text("Нет активного турнира.")
+            return
+
+        matches = self.db.get_playoff_matches(tournament["id"], stage)
+        target = None
+        for m in matches:
+            if m.get("match_num") == match_num:
+                target = m
+                break
+
+        if not target:
+            await update.message.reply_text(f"Матч {stage} #{match_num} не найден.")
+            return
+
+        if target.get("status") == "pending":
+            await update.message.reply_text("Этот матч ещё не начался.")
+            return
+
+        self.db.revert_playoff_match_elo(target["id"])
+
+        if target.get("status") == "completed":
+            winner_nick = target.get("player1_nick") if (target.get("player1_wins") or 0) > (target.get("player2_wins") or 0) else target.get("player2_nick")
+            self._undo_playoff_advance(tournament["id"], stage, match_num, winner_nick)
+
+        await update.message.reply_text(
+            f"✅ Результат {stage} #{match_num} откатчен.\n"
+            f"{target.get('player1_nick')} vs {target.get('player2_nick')} - ожидает результат."
+        )
+
+    def _undo_playoff_advance(self, tournament_id: int, stage: str, match_num: int, winner_nick: str):
+        next_stage_map = {
+            "1/8": "1/4",
+            "1/4": "1/2",
+            "1/2": "final",
+        }
+        next_stage = next_stage_map.get(stage)
+        if not next_stage:
+            return
+
+        target_match_num = (match_num + 1) // 2
+        next_matches = self.db.get_playoff_matches(tournament_id, next_stage)
+        for m in next_matches:
+            if m.get("match_num") == target_match_num:
+                if m.get("player1_nick") == winner_nick:
+                    self.db.update_playoff_match(m["id"], player1_nick=None)
+                elif m.get("player2_nick") == winner_nick:
+                    self.db.update_playoff_match(m["id"], player2_nick=None)
+                break
 
     async def cmd_playoff_graphic(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):

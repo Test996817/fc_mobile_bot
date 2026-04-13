@@ -833,7 +833,7 @@ class Database:
     def update_playoff_match(self, match_id: int, player1_wins: int = None, player2_wins: int = None,
                              status: str = None, message_id: int = None,
                              player1_elo_before: int = None, player2_elo_before: int = None,
-                             elo_applied: int = None):
+                             elo_applied: int = None, player1_nick: str = None, player2_nick: str = None):
         updates = []
         params = []
         if player1_wins is not None:
@@ -857,6 +857,12 @@ class Database:
         if elo_applied is not None:
             updates.append('elo_applied = ?')
             params.append(elo_applied)
+        if player1_nick is not None:
+            updates.append('player1_nick = ?')
+            params.append(player1_nick)
+        if player2_nick is not None:
+            updates.append('player2_nick = ?')
+            params.append(player2_nick)
 
         if updates:
             params.append(match_id)
