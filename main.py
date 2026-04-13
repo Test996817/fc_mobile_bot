@@ -806,21 +806,21 @@ class Database:
         if result == 'win':
             self.cursor.execute('''
                 UPDATE players SET wins = wins + 1, goals_scored = goals_scored + ?,
-                goals_conceded = goals_conceded + ?, rating = rating + ?
+                goals_conceded = goals_conceded + ?
                 WHERE user_id = ?
-            ''', (goals_scored, goals_conceded, rating_change, user_id))
+            ''', (goals_scored, goals_conceded, user_id))
         elif result == 'loss':
             self.cursor.execute('''
                 UPDATE players SET losses = losses + 1, goals_scored = goals_scored + ?,
-                goals_conceded = goals_conceded + ?, rating = rating + ?
+                goals_conceded = goals_conceded + ?
                 WHERE user_id = ?
-            ''', (goals_scored, goals_conceded, rating_change, user_id))
+            ''', (goals_scored, goals_conceded, user_id))
         elif result == 'draw':
             self.cursor.execute('''
                 UPDATE players SET draws = draws + 1, goals_scored = goals_scored + ?,
-                goals_conceded = goals_conceded + ?, rating = rating + ?
+                goals_conceded = goals_conceded + ?
                 WHERE user_id = ?
-            ''', (goals_scored, goals_conceded, rating_change, user_id))
+            ''', (goals_scored, goals_conceded, user_id))
         self.conn.commit()
     
     def get_top_players(self, limit: int = 20) -> List[Dict]:
