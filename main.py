@@ -1712,14 +1712,12 @@ class TournamentBot:
         )
 
     def submit_playoff_elo_games(self, p1_nick: str, p2_nick: str, p1_wins: int, p2_wins: int,
-                                 match_id: int) -> Tuple[int, int]:
+                                 match_id: int, p1_before: int, p2_before: int,
+                                 status: str = 'completed') -> Tuple[int, int]:
         p1 = self.db.get_player_by_nick(p1_nick)
         p2 = self.db.get_player_by_nick(p2_nick)
         if not p1 or not p2:
             return 0, 0
-
-        p1_before = p1['rating']
-        p2_before = p2['rating']
 
         p1_total_delta = 0
         p2_total_delta = 0
@@ -1746,6 +1744,9 @@ class TournamentBot:
 
         self.db.update_playoff_match(
             match_id,
+            p1_wins,
+            p2_wins,
+            status,
             player1_elo_before=p1_before,
             player2_elo_before=p2_before,
             elo_applied=True
@@ -1801,9 +1802,12 @@ class TournamentBot:
             p1_wins = score2
             p2_wins = score1
 
-        status = 'completed' if (p1_wins >= wins_needed or p2_wins >= wins_needed) else 'in_progress'
+        p1 = self.db.get_player_by_nick(playoff_match['player1_nick'])
+        p2 = self.db.get_player_by_nick(playoff_match['player2_nick'])
+        p1_before = p1['rating'] if p1 else 0
+        p2_before = p2['rating'] if p2 else 0
 
-        self.db.update_playoff_match(playoff_match['id'], p1_wins, p2_wins, status)
+        status = 'completed' if (p1_wins >= wins_needed or p2_wins >= wins_needed) else 'in_progress'
 
         winner_nick = playoff_match['player1_nick'] if p1_wins > p2_wins else playoff_match['player2_nick']
         loser_nick = playoff_match['player2_nick'] if p1_wins > p2_wins else playoff_match['player1_nick']
@@ -1819,6 +1823,8 @@ class TournamentBot:
                 p1_wins,
                 p2_wins,
                 playoff_match['id'],
+                p1_before,
+                p2_before,
             )
 
         bracket_text = self.format_playoff_bracket(tournament['id'])
