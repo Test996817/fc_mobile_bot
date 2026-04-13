@@ -1,3 +1,47 @@
+import logging
+import json
+import os
+import re
+import random
+import asyncio
+import html
+import shutil
+import unicodedata
+
+from difflib import SequenceMatcher
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple
+
+from dotenv import load_dotenv
+load_dotenv()
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters,
+    ContextTypes
+)
+
+from services import EloCalculator, ScreenshotAnalyzer, GraphicsRenderer
+
+USE_POSTGRES = bool(os.getenv('DATABASE_URL'))
+if USE_POSTGRES:
+    from db.postgres import Database
+    from db.postgres import AVAILABLE_FORMATS as AVAILABLE_FORMATS
+else:
+    from db.sqlite import Database
+    from db.sqlite import AVAILABLE_FORMATS
+
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+
 class TournamentBot:
     def __init__(self, token: str):
         self.token = token
