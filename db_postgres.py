@@ -289,9 +289,31 @@ class Database:
                 status TEXT DEFAULT 'pending',
                 message_id INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                player1_elo_before INTEGER,
+                player2_elo_before INTEGER,
+                elo_applied BOOLEAN DEFAULT FALSE,
                 UNIQUE(tournament_id, stage, match_num)
             )
         ''')
+
+        self.cursor.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                               WHERE table_name='playoff_matches' AND column_name='player1_elo_before') THEN
+                    ALTER TABLE playoff_matches ADD COLUMN player1_elo_before INTEGER;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                               WHERE table_name='playoff_matches' AND column_name='player2_elo_before') THEN
+                    ALTER TABLE playoff_matches ADD COLUMN player2_elo_before INTEGER;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                               WHERE table_name='playoff_matches' AND column_name='elo_applied') THEN
+                    ALTER TABLE playoff_matches ADD COLUMN elo_applied BOOLEAN DEFAULT FALSE;
+                END IF;
+            END
+            $$;
+        """)
 
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS tournament_rating_snapshots (
@@ -896,7 +918,9 @@ class Database:
             return None
     
     def update_playoff_match(self, match_id: int, player1_wins: int = None, player2_wins: int = None,
-                             status: str = None, message_id: int = None):
+                             status: str = None, message_id: int = None,
+                             player1_elo_before: int = None, player2_elo_before: int = None,
+                             elo_applied: bool = None):
         updates = []
         params = []
         if player1_wins is not None:
@@ -911,14 +935,68 @@ class Database:
         if message_id:
             updates.append('message_id = %s')
             params.append(message_id)
-        
+        if player1_elo_before is not None:
+            updates.append('player1_elo_before = %s')
+            params.append(player1_elo_before)
+        if player2_elo_before is not None:
+            updates.append('player2_elo_before = %s')
+            params.append(player2_elo_before)
+        if elo_applied is not None:
+            updates.append('elo_applied = %s')
+            params.append(elo_applied)
+
         if updates:
             params.append(match_id)
             self.cursor.execute(f"UPDATE playoff_matches SET {', '.join(updates)} WHERE id = %s", params)
             self.conn.commit()
+
+    def revert_playoff_match_elo(self, match_id: int) -> Optional[Dict]:
+        self.cursor.execute('SELECT * FROM playoff_matches WHERE id = %s', (match_id,))
+        row = self.cursor.fetchone()
+        if not row:
+            return None
+        match = dict(row)
+
+        if match.get('elo_applied') and match.get('player1_elo_before') is not None and match.get('player2_elo_before') is not None:
+            p1_id = self.get_player_id_by_nick(match['player1_nick'])
+            p2_id = self.get_player_id_by_nick(match['player2_nick'])
+            p1_wins = int(match['player1_wins'] or 0)
+            p2_wins = int(match['player2_wins'] or 0)
+
+            if p1_id:
+                self.cursor.execute(
+                    'UPDATE players SET rating = %s, wins = GREATEST(wins - %s, 0), losses = GREATEST(losses - %s, 0) WHERE user_id = %s',
+                    (match['player1_elo_before'], p2_wins, p1_wins, p1_id)
+                )
+            if p2_id:
+                self.cursor.execute(
+                    'UPDATE players SET rating = %s, wins = GREATEST(wins - %s, 0), losses = GREATEST(losses - %s, 0) WHERE user_id = %s',
+                    (match['player2_elo_before'], p1_wins, p2_wins, p2_id)
+                )
+
+        self.cursor.execute(
+            'UPDATE playoff_matches SET player1_wins = 0, player2_wins = 0, status = %s, elo_applied = FALSE WHERE id = %s',
+            ('pending', match_id)
+        )
+        self.conn.commit()
+        return match
+
+    def get_player_id_by_nick(self, nick: str) -> Optional[int]:
+        if not nick:
+            return None
+        self.cursor.execute('SELECT user_id FROM players WHERE ingame_nick = %s', (nick,))
+        row = self.cursor.fetchone()
+        return row['user_id'] if row else None
     
     def clear_playoff_matches(self, tournament_id: int):
         self.cursor.execute('DELETE FROM playoff_matches WHERE tournament_id = %s', (tournament_id,))
+        self.conn.commit()
+
+    def clear_playoff_match_slot(self, tournament_id: int, stage: str, match_num: int):
+        self.cursor.execute(
+            'UPDATE playoff_matches SET player1_nick = NULL, player2_nick = NULL WHERE tournament_id = %s AND stage = %s AND match_num = %s',
+            (tournament_id, stage, match_num)
+        )
         self.conn.commit()
 
     def snapshot_tournament_ratings(self, tournament_id: int, user_ids: List[int]):

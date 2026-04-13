@@ -226,9 +226,28 @@ class Database:
                 status TEXT DEFAULT 'pending',
                 message_id INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                player1_elo_before INTEGER,
+                player2_elo_before INTEGER,
+                elo_applied INTEGER DEFAULT 0,
                 UNIQUE(tournament_id, stage, match_num)
             )
         ''')
+
+        try:
+            self.cursor.execute('ALTER TABLE playoff_matches ADD COLUMN player1_elo_before INTEGER')
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self.cursor.execute('ALTER TABLE playoff_matches ADD COLUMN player2_elo_before INTEGER')
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self.cursor.execute('ALTER TABLE playoff_matches ADD COLUMN elo_applied INTEGER DEFAULT 0')
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
 
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS tournament_rating_snapshots (
@@ -635,6 +654,24 @@ class Database:
             'player1_elo_before': row[16] if len(row) > 16 else None,
             'player2_elo_before': row[17] if len(row) > 17 else None,
         }
+
+    def _row_to_playoff_match(self, row) -> Dict:
+        return {
+            'id': row[0],
+            'tournament_id': row[1],
+            'stage': row[2],
+            'match_num': row[3],
+            'player1_nick': row[4],
+            'player2_nick': row[5],
+            'player1_wins': row[6],
+            'player2_wins': row[7],
+            'status': row[8],
+            'message_id': row[9],
+            'created_at': row[10],
+            'player1_elo_before': row[11] if len(row) > 11 else None,
+            'player2_elo_before': row[12] if len(row) > 12 else None,
+            'elo_applied': bool(row[13]) if len(row) > 13 else False,
+        }
     
     def update_match_result(self, match_id: int, score1: int, score2: int, 
                           winner_id: int, reported_by: int, screenshot_id: str = None):
@@ -842,7 +879,8 @@ class Database:
             ''', (tournament_id,))
         
         columns = ['id', 'tournament_id', 'stage', 'match_num', 'player1_nick', 'player2_nick',
-                   'player1_wins', 'player2_wins', 'status', 'message_id', 'created_at']
+                   'player1_wins', 'player2_wins', 'status', 'message_id', 'created_at',
+                   'player1_elo_before', 'player2_elo_before', 'elo_applied']
         return [dict(zip(columns, row)) for row in self.cursor.fetchall()]
     
     def add_playoff_match(self, tournament_id: int, stage: str, match_num: int, 
@@ -863,7 +901,9 @@ class Database:
             return None
     
     def update_playoff_match(self, match_id: int, player1_wins: int = None, player2_wins: int = None,
-                             status: str = None, message_id: int = None):
+                             status: str = None, message_id: int = None,
+                             player1_elo_before: int = None, player2_elo_before: int = None,
+                             elo_applied: int = None):
         updates = []
         params = []
         if player1_wins is not None:
@@ -878,14 +918,68 @@ class Database:
         if message_id:
             updates.append('message_id = ?')
             params.append(message_id)
-        
+        if player1_elo_before is not None:
+            updates.append('player1_elo_before = ?')
+            params.append(player1_elo_before)
+        if player2_elo_before is not None:
+            updates.append('player2_elo_before = ?')
+            params.append(player2_elo_before)
+        if elo_applied is not None:
+            updates.append('elo_applied = ?')
+            params.append(elo_applied)
+
         if updates:
             params.append(match_id)
             self.cursor.execute(f'UPDATE playoff_matches SET {", ".join(updates)} WHERE id = ?', params)
             self.conn.commit()
-    
+
+    def revert_playoff_match_elo(self, match_id: int) -> Optional[Dict]:
+        self.cursor.execute('SELECT * FROM playoff_matches WHERE id = ?', (match_id,))
+        row = self.cursor.fetchone()
+        if not row:
+            return None
+        match = self._row_to_playoff_match(row)
+
+        if match.get('elo_applied') and match.get('player1_elo_before') is not None and match.get('player2_elo_before') is not None:
+            p1_id = self.get_player_id_by_nick(match['player1_nick'])
+            p2_id = self.get_player_id_by_nick(match['player2_nick'])
+            p1_wins = int(match['player1_wins'] or 0)
+            p2_wins = int(match['player2_wins'] or 0)
+
+            if p1_id:
+                self.cursor.execute(
+                    'UPDATE players SET rating = ?, wins = MAX(wins - ?, 0), losses = MAX(losses - ?, 0) WHERE user_id = ?',
+                    (match['player1_elo_before'], p2_wins, p1_wins, p1_id)
+                )
+            if p2_id:
+                self.cursor.execute(
+                    'UPDATE players SET rating = ?, wins = MAX(wins - ?, 0), losses = MAX(losses - ?, 0) WHERE user_id = ?',
+                    (match['player2_elo_before'], p1_wins, p2_wins, p2_id)
+                )
+
+        self.cursor.execute(
+            'UPDATE playoff_matches SET player1_wins = 0, player2_wins = 0, status = ?, elo_applied = 0 WHERE id = ?',
+            ('pending', match_id)
+        )
+        self.conn.commit()
+        return match
+
+    def get_player_id_by_nick(self, nick: str) -> Optional[int]:
+        if not nick:
+            return None
+        self.cursor.execute('SELECT user_id FROM players WHERE ingame_nick = ?', (nick,))
+        row = self.cursor.fetchone()
+        return row[0] if row else None
+
     def clear_playoff_matches(self, tournament_id: int):
         self.cursor.execute('DELETE FROM playoff_matches WHERE tournament_id = ?', (tournament_id,))
+        self.conn.commit()
+
+    def clear_playoff_match_slot(self, tournament_id: int, stage: str, match_num: int):
+        self.cursor.execute(
+            'UPDATE playoff_matches SET player1_nick = NULL, player2_nick = NULL WHERE tournament_id = ? AND stage = ? AND match_num = ?',
+            (tournament_id, stage, match_num)
+        )
         self.conn.commit()
 
     def snapshot_tournament_ratings(self, tournament_id: int, user_ids: List[int]):
@@ -1616,7 +1710,49 @@ class TournamentBot:
         await update.message.reply_text(
             f"✅ Таблица групп переотправлена в топик {topic_id or target_thread_id}."
         )
-    
+
+    def submit_playoff_elo_games(self, p1_nick: str, p2_nick: str, p1_wins: int, p2_wins: int,
+                                 match_id: int) -> Tuple[int, int]:
+        p1 = self.db.get_player_by_nick(p1_nick)
+        p2 = self.db.get_player_by_nick(p2_nick)
+        if not p1 or not p2:
+            return 0, 0
+
+        p1_before = p1['rating']
+        p2_before = p2['rating']
+
+        p1_total_delta = 0
+        p2_total_delta = 0
+
+        for _ in range(p1_wins):
+            new_r1, new_r2, _ = self.elo.calculate(p1['rating'], p2['rating'], 1.0)
+            delta = new_r1 - p1['rating']
+            p1_total_delta += delta
+            p2_total_delta -= delta
+            self.db.update_player_stats(p1['user_id'], 'win', 0, 0, delta)
+            self.db.update_player_stats(p2['user_id'], 'loss', 0, 0, new_r2 - p2['rating'])
+            p1['rating'] = new_r1
+            p2['rating'] = new_r2
+
+        for _ in range(p2_wins):
+            new_r1, new_r2, _ = self.elo.calculate(p1['rating'], p2['rating'], 0.0)
+            delta = new_r2 - p2['rating']
+            p2_total_delta += delta
+            p1_total_delta -= delta
+            self.db.update_player_stats(p2['user_id'], 'win', 0, 0, delta)
+            self.db.update_player_stats(p1['user_id'], 'loss', 0, 0, new_r1 - p1['rating'])
+            p1['rating'] = new_r1
+            p2['rating'] = new_r2
+
+        self.db.update_playoff_match(
+            match_id,
+            player1_elo_before=p1_before,
+            player2_elo_before=p2_before,
+            elo_applied=True
+        )
+
+        return p1_total_delta, p2_total_delta
+
     async def _submit_playoff_result(self, update: Update, context: ContextTypes.DEFAULT_TYPE,
                                       tournament: Dict, nick1: str, score1: int, score2: int, nick2: str):
         if score1 == score2:
@@ -1672,8 +1808,18 @@ class TournamentBot:
         winner_nick = playoff_match['player1_nick'] if p1_wins > p2_wins else playoff_match['player2_nick']
         loser_nick = playoff_match['player2_nick'] if p1_wins > p2_wins else playoff_match['player1_nick']
 
+        elo_delta_p1 = 0
+        elo_delta_p2 = 0
+
         if status == 'completed':
             self.advance_playoff(tournament['id'], stage, playoff_match['match_num'], winner_nick, loser_nick)
+            elo_delta_p1, elo_delta_p2 = self.submit_playoff_elo_games(
+                playoff_match['player1_nick'],
+                playoff_match['player2_nick'],
+                p1_wins,
+                p2_wins,
+                playoff_match['id'],
+            )
 
         bracket_text = self.format_playoff_bracket(tournament['id'])
 
@@ -1692,14 +1838,17 @@ class TournamentBot:
         result_text = f"✅ Записан результат {stage} #{playoff_match['match_num']}:\n"
         result_text += f"{playoff_match['player1_nick']} {p1_wins}-{p2_wins} {playoff_match['player2_nick']}\n"
         if status == 'completed':
+            p1_sign = '+' if elo_delta_p1 >= 0 else ''
+            p2_sign = '+' if elo_delta_p2 >= 0 else ''
+            result_text += f"📈 ELO: {playoff_match['player1_nick']} {p1_sign}{elo_delta_p1} | {playoff_match['player2_nick']} {p2_sign}{elo_delta_p2}\n"
             if stage == 'final':
-                result_text += f"\n🏆 {winner_nick} — чемпион турнира!"
+                result_text += f"🏆 {winner_nick} — чемпион турнира!"
             elif stage == 'bronze':
-                result_text += f"\n🥉 {winner_nick} занимает 3 место!"
+                result_text += f"🥉 {winner_nick} занимает 3 место!"
             else:
-                result_text += f"\n🏆 {winner_nick} проходит в следующий раунд!"
+                result_text += f"🏆 {winner_nick} проходит в следующий раунд!"
         else:
-            result_text += f"\n⏳ {wins_needed} побед для прохода. Текущий счёт: {p1_wins}-{p2_wins}"
+            result_text += f"⏳ {wins_needed} побед для прохода. Текущий счёт: {p1_wins}-{p2_wins}"
 
         await update.message.reply_text(result_text)
 
@@ -3817,45 +3966,97 @@ class TournamentBot:
         if not self.db.is_admin(update.effective_user.id):
             await update.message.reply_text("❌ Команда доступна только админам.")
             return
-        
+
         if len(context.args) < 1:
             await update.message.reply_text("Использование: /cancelmatch <match_id>")
             return
-        
+
         try:
             match_id = int(context.args[0])
         except ValueError:
             await update.message.reply_text("❌ Неверный формат match_id")
             return
-        
+
         match = self.db.get_match_by_id(match_id)
-        if not match:
+
+        if match:
+            tournament = self.db.get_tournament(match['tournament_id'])
+            if not tournament or tournament.get('chat_id') != update.effective_chat.id:
+                await update.message.reply_text(f"❌ Матч #{match_id} не принадлежит этому чату")
+                return
+
+            player1 = self.db.get_player(match['player1_id'])
+            player2 = self.db.get_player(match['player2_id'])
+            p1_nick = player1.get('ingame_nick', '?') if player1 else '?'
+            p2_nick = player2.get('ingame_nick', '?') if player2 else '?'
+
+            success, player1, player2 = self.db.cancel_match(match_id)
+
+            if success:
+                p1_elo = player1.get('rating') if player1 else '?'
+                p2_elo = player2.get('rating') if player2 else '?'
+
+                await update.message.reply_text(
+                    f"✅ Результат матча #{match_id} ({p1_nick} vs {p2_nick}) снят\n"
+                    f"🕓 Матч снова в статусе pending\n"
+                    f"📈 ELO: {p1_nick} → {p1_elo} | {p2_nick} → {p2_elo}"
+                )
+            else:
+                await update.message.reply_text(f"❌ Ошибка при отмене матча #{match_id}")
+            return
+
+        all_stages = ['1/8', '1/4', '1/2', 'bronze', 'final']
+        found_playoff = None
+        tournament = self.db.get_tournament_by_chat(update.effective_chat.id)
+        if tournament:
+            for stage in all_stages:
+                matches = self.db.get_playoff_matches(tournament['id'], stage)
+                for pm in matches:
+                    if pm.get('id') == match_id and pm.get('status') == 'completed':
+                        found_playoff = (stage, pm)
+                        break
+                if found_playoff:
+                    break
+
+        if not found_playoff:
             await update.message.reply_text(f"❌ Матч #{match_id} не найден")
             return
-        
-        tournament = self.db.get_tournament(match['tournament_id'])
-        if not tournament or tournament.get('chat_id') != update.effective_chat.id:
-            await update.message.reply_text(f"❌ Матч #{match_id} не принадлежит этому чату")
-            return
-        
-        player1 = self.db.get_player(match['player1_id'])
-        player2 = self.db.get_player(match['player2_id'])
-        p1_nick = player1.get('ingame_nick', '?') if player1 else '?'
-        p2_nick = player2.get('ingame_nick', '?') if player2 else '?'
-        
-        success, player1, player2 = self.db.cancel_match(match_id)
-        
-        if success:
-            p1_elo = player1.get('rating') if player1 else '?'
-            p2_elo = player2.get('rating') if player2 else '?'
-            
+
+        stage, playoff_match = found_playoff
+        p1_nick = playoff_match.get('player1_nick') or '?'
+        p2_nick = playoff_match.get('player2_nick') or '?'
+
+        reverted = self.db.revert_playoff_match_elo(match_id)
+        if reverted:
+            self._clear_next_round_slot(tournament['id'], stage, playoff_match['match_num'])
+
+            bracket_text = self.format_playoff_bracket(tournament['id'])
+            if tournament.get('playoff_message_id'):
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=tournament['chat_id'],
+                        message_id=tournament['playoff_message_id'],
+                        text=bracket_text,
+                        parse_mode='HTML',
+                        disable_web_page_preview=True
+                    )
+                except Exception as e:
+                    logger.error(f"Error editing playoff bracket on cancel: {e}")
+
             await update.message.reply_text(
-                f"✅ Результат матча #{match_id} ({p1_nick} vs {p2_nick}) снят\n"
-                f"🕓 Матч снова в статусе pending\n"
-                f"📈 ELO: {p1_nick} → {p1_elo} | {p2_nick} → {p2_elo}"
+                f"✅ Результат {stage} #{playoff_match['match_num']} ({p1_nick} vs {p2_nick}) снят\n"
+                f"🕓 Матч снова в статусе pending"
             )
         else:
-            await update.message.reply_text(f"❌ Ошибка при отмене матча #{match_id}")
+            await update.message.reply_text(f"❌ Ошибка при отмене playoff-матча #{match_id}")
+
+    def _clear_next_round_slot(self, tournament_id: int, stage: str, match_num: int):
+        stage_order = {'1/8': '1/4', '1/4': '1/2', '1/2': 'final'}
+        if stage not in stage_order:
+            return
+        next_stage = stage_order[stage]
+        target_match_num = (match_num + 1) // 2
+        self.db.clear_playoff_match_slot(tournament_id, next_stage, target_match_num)
 
     async def cmd_notify_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
