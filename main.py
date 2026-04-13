@@ -818,9 +818,9 @@ class Database:
         elif result == 'draw':
             self.cursor.execute('''
                 UPDATE players SET draws = draws + 1, goals_scored = goals_scored + ?,
-                goals_conceded = goals_conceded + ?
+                goals_conceded = goals_conceded + ?, rating = rating + ?
                 WHERE user_id = ?
-            ''', (goals_scored, goals_conceded, user_id))
+            ''', (goals_scored, goals_conceded, rating_change, user_id))
         self.conn.commit()
     
     def get_top_players(self, limit: int = 20) -> List[Dict]:
