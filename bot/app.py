@@ -54,7 +54,6 @@ class TournamentBot:
         self.cooldowns = {}
         self.media_groups_buffer = {}
         self.media_groups_tasks = {}
-        self.pending_match_hints = {}
         self.setup_handlers()
     
     def setup_handlers(self):
@@ -107,11 +106,6 @@ class TournamentBot:
             filters.TEXT & ~filters.COMMAND & filters.Regex(r'(?i)^\s*\+\s*рез\b'),
             self.handle_gresult_text
         ))
-        self.application.add_handler(MessageHandler(
-            filters.TEXT & ~filters.COMMAND & filters.Regex(r'^\s*@?\S.{0,40}\s*(?:-|–|—|vs|VS)\s*@?\S.{0,40}\s*$'),
-            self.handle_match_hint_message
-        ))
-        
         self.application.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
         self.application.add_error_handler(self.handle_error)
@@ -189,33 +183,7 @@ class TournamentBot:
         self.db.update_tournament_results_topic(tournament['id'], topic_id)
         await update.message.reply_text(f"✅ Топик результатов сохранён (ID: {topic_id})")
 
-    async def handle_match_hint_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not update.message or not update.message.text:
-            return
 
-        user_id = update.effective_user.id
-        is_admin = self.db.is_admin(user_id)
-        player = self.db.get_player(user_id)
-        if not player and not is_admin:
-            return
-
-        chat_id = update.effective_chat.id
-        tournament = self.db.get_tournament_by_chat(chat_id)
-        if not tournament:
-            return
-
-        results_topic_id = tournament.get('results_topic_id')
-        thread_id = update.message.message_thread_id
-        if results_topic_id and thread_id != results_topic_id:
-            return
-
-        key = (chat_id, thread_id or 0, user_id)
-        self.pending_match_hints[key] = {
-            "text": update.message.text.strip(),
-            "ts": datetime.now().timestamp(),
-        }
-        await update.message.reply_text("✅ Пара принята. Теперь отправь скриншоты.")
-    
     def generate_groups_table(self, tournament_id: int) -> str:
         text = "━━━━━━━━━━━━━━━━━━━━\n🏆 ГРУППОВОЙ ЭТАП\n━━━━━━━━━━━━━━━━━━━━\n\n"
         
@@ -1396,56 +1364,6 @@ class TournamentBot:
             return None
 
         caption_match = resolve_match_by_text(caption)
-        hint_key_used = None
-        if not caption_match:
-            now_ts = datetime.now().timestamp()
-            candidate_keys = [
-                (chat_id, thread_id or 0, user_id),
-                (chat_id, results_topic_id or 0, user_id),
-            ]
-
-            for key in candidate_keys:
-                hint = self.pending_match_hints.get(key)
-                if not hint:
-                    continue
-                if now_ts - hint.get("ts", 0) > 900:
-                    self.pending_match_hints.pop(key, None)
-                    continue
-                caption_match = resolve_match_by_text(hint.get("text", ""))
-                if caption_match:
-                    hint_key_used = key
-                    break
-
-            if not caption_match:
-                # fallback: any свежая подсказка этого пользователя в чате
-                for key, hint in list(self.pending_match_hints.items()):
-                    k_chat, _k_thread, k_user = key
-                    if k_chat != chat_id or k_user != user_id:
-                        continue
-                    if now_ts - hint.get("ts", 0) > 900:
-                        self.pending_match_hints.pop(key, None)
-                        continue
-                    caption_match = resolve_match_by_text(hint.get("text", ""))
-                    if caption_match:
-                        hint_key_used = key
-                        break
-
-        if not caption_match:
-            await self._send_results_reply(
-                context,
-                chat_id,
-                output_thread_id,
-                "❌ Не удалось определить матч по подписи.\n"
-                "Укажи подпись в формате: player1 - player2",
-            )
-            return
-
-        self.pending_match_hints.pop((chat_id, thread_id or 0, user_id), None)
-        if results_topic_id:
-            self.pending_match_hints.pop((chat_id, results_topic_id, user_id), None)
-        if hint_key_used:
-            self.pending_match_hints.pop(hint_key_used, None)
-
         match, cp1, cp2 = caption_match
 
         recognized_scores = []
