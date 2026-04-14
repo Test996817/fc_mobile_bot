@@ -1,7 +1,6 @@
 import logging
 import os
 import re
-import shutil
 import unicodedata
 from typing import Dict, List, Optional, Tuple
 
@@ -13,46 +12,24 @@ class ScreenshotAnalyzer:
 
     def __init__(self):
         self.ocr_available = False
+        self.reader = None
         self.max_plausible_score = self._load_max_plausible_score()
-        self._ocr_lang = "eng+rus"
-        self._tesseract_cmd = None
+        self._ocr_lang = ["en", "ru"]
         try:
-            import pytesseract
-            from PIL import Image
-            self.pytesseract = pytesseract
-            self.Image = Image
-
-            env_cmd = os.getenv("TESSERACT_CMD", "").strip()
-            if env_cmd:
-                if os.path.isabs(env_cmd):
-                    if os.path.exists(env_cmd):
-                        self._tesseract_cmd = env_cmd
-                    else:
-                        logger.warning("TESSERACT_CMD path does not exist: %s", env_cmd)
-                else:
-                    resolved_env_cmd = shutil.which(env_cmd)
-                    if resolved_env_cmd:
-                        self._tesseract_cmd = resolved_env_cmd
-                    else:
-                        logger.warning("TESSERACT_CMD binary is not found in PATH: %s", env_cmd)
-
-            if not self._tesseract_cmd:
-                detected_cmd = shutil.which("tesseract")
-                if detected_cmd:
-                    self._tesseract_cmd = detected_cmd
-
-            if self._tesseract_cmd:
-                self.pytesseract.pytesseract.tesseract_cmd = self._tesseract_cmd
-
-            try:
-                self.pytesseract.get_tesseract_version()
-                self.ocr_available = True
-                logger.info("OCR module loaded successfully")
-            except Exception as version_error:
-                self.ocr_available = False
-                logger.warning("OCR binary is unavailable: %s", version_error)
+            import easyocr
+            self.easyocr = easyocr
+            self.reader = easyocr.Reader(
+                self._ocr_lang,
+                gpu=False,
+                verbose=False,
+                download_enabled=True,
+            )
+            self.ocr_available = True
+            logger.info("EasyOCR module loaded successfully")
         except ImportError as e:
-            logger.warning(f"OCR not available: {e}")
+            logger.warning(f"EasyOCR not available: {e}")
+        except Exception as e:
+            logger.warning(f"EasyOCR init error: {e}")
 
     def _load_max_plausible_score(self) -> int:
         raw_value = os.getenv("OCR_MAX_SCORE", str(self.DEFAULT_MAX_PLAUSIBLE_SCORE)).strip()
@@ -69,32 +46,17 @@ class ScreenshotAnalyzer:
             self.DEFAULT_MAX_PLAUSIBLE_SCORE,
         )
         return self.DEFAULT_MAX_PLAUSIBLE_SCORE
-    
+
     def extract_text(self, photo_path: str) -> str:
-        if not self.ocr_available:
+        if not self.ocr_available or not self.reader:
             return ""
         try:
-            if self._tesseract_cmd:
-                self.pytesseract.pytesseract.tesseract_cmd = self._tesseract_cmd
-            image = self.Image.open(photo_path)
-            text = self.pytesseract.image_to_string(image, lang=self._ocr_lang)
-            return text
+            results = self.reader.readtext(photo_path, detail=0)
+            return "\n".join(results)
         except Exception as e:
-            logger.error(f"OCR error: {e}")
-            if "not installed" in str(e) or "No such file or directory" in str(e):
-                self.ocr_available = False
-            if self._ocr_lang != "eng":
-                try:
-                    if self._tesseract_cmd:
-                        self.pytesseract.pytesseract.tesseract_cmd = self._tesseract_cmd
-                    image = self.Image.open(photo_path)
-                    text = self.pytesseract.image_to_string(image, lang="eng")
-                    self._ocr_lang = "eng"
-                    return text
-                except Exception:
-                    pass
+            logger.error(f"EasyOCR error: {e}")
             return ""
-    
+
     def extract_scores(self, text: str) -> Tuple[Optional[int], Optional[int]]:
         if not text:
             return None, None
@@ -116,8 +78,10 @@ class ScreenshotAnalyzer:
             return 0 <= a <= self.max_plausible_score and 0 <= b <= self.max_plausible_score
 
         lines = [normalize_ocr_chars(line.strip()) for line in text.split('\n') if line.strip()]
-        candidates: List[Tuple[int, int, int]] = []  # score1, score2, confidence
-        score_pattern = re.compile(r'(?<![\dA-Za-zА-Яа-я])(\d{1,2})\s*[:\-–—]\s*(\d{1,2})(?![\dA-Za-zА-Яа-я])')
+        candidates: List[Tuple[int, int, int]] = []
+        score_pattern = re.compile(r'(?<![\dA-Za-zМаиас]
+](\d{1,2})\s*[:\-–ӑ]\s*(?<![\dA-Za-zМаиас]
+]')
 
         for idx, line in enumerate(lines[:15]):
             for m in score_pattern.finditer(line):
@@ -155,7 +119,6 @@ class ScreenshotAnalyzer:
             second_stats = ranking[1][1]
             score_gap = best_stats["sum_conf"] - second_stats["sum_conf"]
 
-            # Если OCR дал несколько близких вариантов, считаем скрин неоднозначным.
             if score_gap < 20 and best_stats["count"] == 1:
                 return None, None
 
@@ -165,7 +128,6 @@ class ScreenshotAnalyzer:
         if not value:
             return ""
         norm = unicodedata.normalize("NFKC", value).lower().replace('@', '').strip()
-        # оставляем только буквы/цифры для устойчивого fuzzy-сопоставления
         return ''.join(ch for ch in norm if ch.isalnum())
 
     def extract_nick_tokens(self, text: str) -> List[str]:
@@ -175,8 +137,8 @@ class ScreenshotAnalyzer:
         tokens = []
         seen = set()
         patterns = [
-            r'@([A-Za-zА-Яа-я0-9_.-]{2,32})',
-            r'\b([A-Za-zА-Яа-я0-9_.-]{3,32})\b',
+            r'@([A-Za-zМаиас00-9._.],{2,32})',
+            r'\b([A-Za-zМаиах0-9.-_.]{3,32})\b',
         ]
 
         for pattern in patterns:
