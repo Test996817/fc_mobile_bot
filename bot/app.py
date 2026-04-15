@@ -1365,6 +1365,14 @@ class TournamentBot:
             return None
 
         caption_match = resolve_match_by_text(caption)
+        if not caption_match:
+            await self._send_results_reply(
+                context,
+                chat_id,
+                output_thread_id,
+                "Не удалось распознать игроков по подписи. Укажи @nick1 - @nick2 в подписи к скриншотам.",
+            )
+            return
         match, cp1, cp2 = caption_match
 
         recognized_scores = []
@@ -1914,17 +1922,12 @@ class TournamentBot:
             group_num = (i % groups_count) + 1
             group_name = f"Группа {chr(64 + group_num)}"
             
-            self.db.cursor.execute('''
-                UPDATE tournament_players SET group_name = %s
-                WHERE tournament_id = %s AND user_id = %s
-            ''', (group_name, tournament['id'], player['user_id']))
+            self.db.set_player_group(tournament['id'], player['user_id'], group_name)
             
             if group_name not in groups:
                 groups[group_name] = []
             groups[group_name].append(player)
-        
-        self.db.conn.commit()
-        
+
         for group_name, group_players in groups.items():
             for i, p1 in enumerate(group_players):
                 for p2 in group_players[i+1:]:
@@ -2834,11 +2837,7 @@ class TournamentBot:
                 f"⚠️ Эти ники не найдены в группах текущего турнира: {missing}"
             )
         
-        self.db.cursor.execute(
-            'UPDATE tournaments SET playoff_message_id = %s WHERE id = %s',
-            (msg.message_id, tournament['id'])
-        )
-        self.db.conn.commit()
+        self.db.set_playoff_message_id(tournament['id'], msg.message_id)
 
     def set_playoff_match_slot(self, tournament_id: int, stage: str, match_num: int, slot: int, nick: str):
         matches = self.db.get_playoff_matches(tournament_id, stage)
