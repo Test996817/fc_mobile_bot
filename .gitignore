@@ -13,6 +13,9 @@ screenshots/*.jpg
 screenshots/*.png
 screenshots/*.jpeg
 
+# Generated graphics
+tmp/
+
 # Python
 __pycache__/
 *.py[cod]
