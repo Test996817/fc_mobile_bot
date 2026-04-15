@@ -325,34 +325,6 @@ class Database:
             )
         ''')
 
-        self.cursor.execute('''
-            DO $$ BEGIN
-                ALTER TABLE tournaments ADD COLUMN playoff_message_id INTEGER;
-            EXCEPTION WHEN others THEN NULL;
-            END $$;
-        ''')
-        
-        self.cursor.execute('''
-            DO $$ BEGIN
-                ALTER TABLE tournaments ADD COLUMN groups_topic_id BIGINT;
-            EXCEPTION WHEN others THEN NULL;
-            END $$;
-        ''')
-        
-        self.cursor.execute('''
-            DO $$ BEGIN
-                ALTER TABLE tournaments ADD COLUMN groups_message_id INTEGER;
-            EXCEPTION WHEN others THEN NULL;
-            END $$;
-        ''')
-        
-        self.cursor.execute('''
-            DO $$ BEGIN
-                ALTER TABLE tournaments ADD COLUMN results_topic_id BIGINT;
-            EXCEPTION WHEN others THEN NULL;
-            END $$;
-        ''')
-        
         self.conn.commit()
     
     def add_player(self, user_id: int, username: str, ingame_nick: str = None) -> bool:
@@ -660,7 +632,21 @@ class Database:
             UPDATE tournaments SET playoff_graphic_message_id = %s WHERE id = %s
         ''', (message_id, tournament_id))
         self.conn.commit()
+
+    def set_playoff_message_id(self, tournament_id: int, message_id: int):
+        self.cursor.execute(
+            'UPDATE tournaments SET playoff_message_id = %s WHERE id = %s',
+            (message_id, tournament_id),
+        )
+        self.conn.commit()
     
+    def set_player_group(self, tournament_id: int, user_id: int, group_name: str):
+        self.cursor.execute(
+            'UPDATE tournament_players SET group_name = %s WHERE tournament_id = %s AND user_id = %s',
+            (group_name, tournament_id, user_id),
+        )
+        self.conn.commit()
+
     def update_tournament_player_status(self, tournament_id: int, user_id: int, 
                                        status: str, approved_by: int = None):
         self.cursor.execute('''
@@ -1032,9 +1018,11 @@ class Database:
     
     def close(self):
         self.conn.close()
+
     def delete_tournament(self, tournament_id: int):
         self.cursor.execute('DELETE FROM matches WHERE tournament_id = %s', (tournament_id,))
         self.cursor.execute('DELETE FROM playoff_matches WHERE tournament_id = %s', (tournament_id,))
+        self.cursor.execute('DELETE FROM tournament_rating_snapshots WHERE tournament_id = %s', (tournament_id,))
         self.cursor.execute('DELETE FROM tournament_players WHERE tournament_id = %s', (tournament_id,))
         self.cursor.execute('DELETE FROM tournaments WHERE id = %s', (tournament_id,))
         self.conn.commit()
