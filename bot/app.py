@@ -1364,13 +1364,79 @@ class TournamentBot:
                     return cmatch, cp1, cp2
             return None
 
+        # --- Шаг 1: пробуем извлечь ники и счёт прямо со скриншотов (EasyOCR) ---
+        ocr_match_info = await self._try_extract_fc_match_info(photos, screenshots_dir)
+
+        if ocr_match_info:
+            ocr_p1_nick = ocr_match_info["player1_nick"]
+            ocr_p2_nick = ocr_match_info["player2_nick"]
+            ocr_score1 = ocr_match_info["score1"]
+            ocr_score2 = ocr_match_info["score2"]
+
+            def nick_key(n: str) -> str:
+                return (n or "").strip().casefold()
+
+            ocr_k1 = nick_key(ocr_p1_nick)
+            ocr_k2 = nick_key(ocr_p2_nick)
+
+            # Точное совпадение ников
+            matched_row = None
+            for pmatch, pp1, pp2 in pending_match_rows:
+                m1 = nick_key(pp1.get("ingame_nick") or "")
+                m2 = nick_key(pp2.get("ingame_nick") or "")
+                if (m1 == ocr_k1 and m2 == ocr_k2) or (m1 == ocr_k2 and m2 == ocr_k1):
+                    matched_row = (pmatch, pp1, pp2)
+                    break
+
+            # Fuzzy-поиск, если точного совпадения нет
+            if not matched_row:
+                matched_row = self._find_match_by_ocr_nicks(
+                    ocr_p1_nick, ocr_p2_nick, pending_match_rows, tournament_players,
+                )
+
+            if matched_row:
+                match, cp1, cp2 = matched_row
+                if nick_key(cp1.get("ingame_nick") or "") == ocr_k1:
+                    p1_score, p2_score = ocr_score1, ocr_score2
+                else:
+                    p1_score, p2_score = ocr_score2, ocr_score1
+
+                if p1_score > p2_score:
+                    winner_id = match["player1_id"]
+                elif p2_score > p1_score:
+                    winner_id = match["player2_id"]
+                else:
+                    winner_id = None
+
+                match_notification = await self.process_match_result(
+                    match, p1_score, p2_score, winner_id, user_id, send_notification=False,
+                )
+                self.cooldowns[user_id] = current_time
+
+                p1 = self.db.get_player(match["player1_id"])
+                p2 = self.db.get_player(match["player2_id"])
+                p1_nick = self._copyable_nick(p1.get("ingame_nick"))
+                p2_nick = self._copyable_nick(p2.get("ingame_nick"))
+                ocr_summary = (
+                    f"✅ Результат записан (OCR скриншот): "
+                    f"{p1_nick} {p1_score}:{p2_score} {p2_nick}"
+                )
+                full_text = (
+                    f"{match_notification}\n\n{ocr_summary}"
+                    if match_notification else ocr_summary
+                )
+                await self._send_results_reply(context, chat_id, output_thread_id, full_text)
+                return
+            # Матч не найден по OCR-никам — фоллбэк на caption
+
+        # --- Шаг 2: фоллбэк — резолвим матч из caption, счёт из скриншотов ---
         caption_match = resolve_match_by_text(caption)
         if not caption_match:
             await self._send_results_reply(
                 context,
                 chat_id,
                 output_thread_id,
-                "Не удалось распознать игроков по подписи. Укажи @nick1 - @nick2 в подписи к скриншотам.",
+                "Не удалось распознать игроков. Укажи @nick1 - @nick2 в подписи к скриншотам.",
             )
             return
         match, cp1, cp2 = caption_match
@@ -1471,7 +1537,80 @@ class TournamentBot:
 
         full_text = f"{match_notification}\n\n{ocr_summary}" if match_notification else ocr_summary
         await self._send_results_reply(context, chat_id, output_thread_id, full_text)
-    
+
+    async def _try_extract_fc_match_info(
+        self, photos, screenshots_dir: str,
+    ) -> Optional[Dict]:
+        """Try to extract player nicks and score from screenshots using EasyOCR."""
+        for i, photo in enumerate(photos, start=1):
+            try:
+                photo_file = await self.application.bot.get_file(photo.file_id)
+                safe_file_id = re.sub(r"[^A-Za-z0-9_-]+", "_", photo.file_id)
+                safe_file_id = safe_file_id[:120] if safe_file_id else f"photo_{i}"
+                photo_path = os.path.join(screenshots_dir, f"match_{safe_file_id}.jpg")
+                await photo_file.download_to_drive(photo_path)
+
+                info = self.screenshot_analyzer.extract_fc_match_info(photo_path)
+                if info:
+                    logger.info(
+                        f"OCR extracted: {info['player1_nick']} "
+                        f"{info['score1']}:{info['score2']} {info['player2_nick']}"
+                    )
+                    return info
+            except Exception as e:
+                logger.error(f"Error in _try_extract_fc_match_info photo {i}: {e}")
+        return None
+
+    def _find_match_by_ocr_nicks(
+        self,
+        ocr_nick1: str,
+        ocr_nick2: str,
+        pending_match_rows: List[Tuple],
+        tournament_players: List[Dict],
+    ) -> Optional[Tuple]:
+        """Fuzzy-match OCR-extracted nicks against pending matches."""
+        def nick_key(n: str) -> str:
+            return (n or "").strip().casefold()
+
+        ocr_k1 = nick_key(ocr_nick1)
+        ocr_k2 = nick_key(ocr_nick2)
+
+        best_candidate = None
+        best_total = 0.0
+
+        for pmatch, pp1, pp2 in pending_match_rows:
+            p1_norm = self.screenshot_analyzer.normalize_nick(pp1.get("ingame_nick") or "")
+            p2_norm = self.screenshot_analyzer.normalize_nick(pp2.get("ingame_nick") or "")
+            if not p1_norm or not p2_norm:
+                continue
+
+            ocr1_norm = self.screenshot_analyzer.normalize_nick(ocr_nick1)
+            ocr2_norm = self.screenshot_analyzer.normalize_nick(ocr_nick2)
+
+            direct_total = (
+                SequenceMatcher(None, ocr1_norm, p1_norm).ratio()
+                + SequenceMatcher(None, ocr2_norm, p2_norm).ratio()
+            )
+            reverse_total = (
+                SequenceMatcher(None, ocr1_norm, p2_norm).ratio()
+                + SequenceMatcher(None, ocr2_norm, p1_norm).ratio()
+            )
+
+            if direct_total >= reverse_total:
+                total = direct_total
+                candidate = (pmatch, pp1, pp2)
+            else:
+                total = reverse_total
+                candidate = (pmatch, pp2, pp1)
+
+            if total > best_total:
+                best_total = total
+                best_candidate = candidate
+
+        if best_candidate and best_total >= 1.20:
+            return best_candidate
+        return None
+
     async def process_match_result(self, match: Dict, score1: int, score2: int,
                                   winner_id: int, reported_by: int, screenshot_id: str = None,
                                   send_notification: bool = True) -> str:

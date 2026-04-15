@@ -13,8 +13,9 @@ class ScreenshotAnalyzer:
     def __init__(self):
         self.ocr_available = False
         self.reader = None
+        self._ocr_lang = self._load_ocr_languages()
+        self._ocr_contrast_enhance = os.getenv("OCR_CONTRAST_ENHANCE", "false").lower() == "true"
         self.max_plausible_score = self._load_max_plausible_score()
-        self._ocr_lang = ["en", "ru"]
         try:
             import easyocr
             self.easyocr = easyocr
@@ -23,6 +24,7 @@ class ScreenshotAnalyzer:
                 gpu=False,
                 verbose=False,
                 download_enabled=True,
+                paragraph_text=False,
             )
             self.ocr_available = True
             logger.info("EasyOCR module loaded successfully")
@@ -30,6 +32,13 @@ class ScreenshotAnalyzer:
             logger.warning(f"EasyOCR not available: {e}")
         except Exception as e:
             logger.warning(f"EasyOCR init error: {e}")
+
+    def _load_ocr_languages(self) -> List[str]:
+        raw = os.getenv("OCR_LANG", "en,ru").strip()
+        langs = [lang.strip() for lang in raw.split(",") if lang.strip()]
+        if not langs:
+            return ["en", "ru"]
+        return langs
 
     def _load_max_plausible_score(self) -> int:
         raw_value = os.getenv("OCR_MAX_SCORE", str(self.DEFAULT_MAX_PLAUSIBLE_SCORE)).strip()
