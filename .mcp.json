@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "context7": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@upstash/context7-mcp"
+      ],
+      "description": "Fetches up-to-date library docs into context. Prevents hallucinated APIs."
+    },
+    "deepwiki": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "deepwiki-mcp"
+      ],
+      "description": "Fetches structured wiki-style documentation for any GitHub repo."
+    }
+  }
+}

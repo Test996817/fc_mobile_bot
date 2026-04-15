@@ -1,16 +1,9 @@
 # main.py - FC Mobile Tournament Bot v2
 import logging
 import sqlite3
-import json
 import os
 import re
-import random
-import asyncio
-import html
-import shutil
-import unicodedata
 
-from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass

@@ -1,9 +1,31 @@
 import logging
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TournamentFormat:
+    name: str
+    has_groups: bool
+    description: str
+
+
+AVAILABLE_FORMATS: Dict[str, TournamentFormat] = {
+    "single_elimination": TournamentFormat(
+        name="Single Elimination",
+        has_groups=False,
+        description="Выбывание после первого поражения"
+    ),
+    "classical": TournamentFormat(
+        name="Классический",
+        has_groups=True,
+        description="4 группы по 8, плей-офф"
+    ),
+}
 
 
 class Database:
@@ -989,6 +1011,7 @@ USE_POSTGRES = bool(os.getenv("DATABASE_URL"))
 if USE_POSTGRES:
     from db.postgres import Database
     from db.postgres import AVAILABLE_FORMATS as AVAILABLE_FORMATS
+
 
 
 
