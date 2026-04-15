@@ -215,8 +215,8 @@ class ScreenshotAnalyzer:
         seen = set()
         cyrillic = "\u0410-\u044f"
         patterns = [
-            r'@([A-Za-z0' + cyrillic + r'0-9_.\-]{2,32})',
-            r'\b([A-Za-z0' + cyrillic + r'0-9_.\-]{3,32})\b',
+            r'@([A-Za-z' + cyrillic + r'0-9_.\-]{2,32})',
+            r'\b([A-Za-z' + cyrillic + r'0-9_.\-]{3,32})\b',
         ]
 
         for pattern in patterns:
