@@ -1,3 +1,11 @@
+import logging
+import sqlite3
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+
 class Database:
     def __init__(self, db_name: str = "tournament_bot.db"):
         self.conn = sqlite3.connect(db_name, check_same_thread=False)
@@ -414,6 +422,13 @@ class Database:
             UPDATE tournaments SET playoff_graphic_message_id = ? WHERE id = ?
         ''', (message_id, tournament_id))
         self.conn.commit()
+
+    def set_playoff_message_id(self, tournament_id: int, message_id: int):
+        self.cursor.execute(
+            'UPDATE tournaments SET playoff_message_id = ? WHERE id = ?',
+            (message_id, tournament_id),
+        )
+        self.conn.commit()
     
     def add_player_to_tournament(self, tournament_id: int, user_id: int, status: str = 'pending') -> bool:
         try:
@@ -445,6 +460,13 @@ class Database:
             return p
         return None
     
+    def set_player_group(self, tournament_id: int, user_id: int, group_name: str):
+        self.cursor.execute(
+            'UPDATE tournament_players SET group_name = ? WHERE tournament_id = ? AND user_id = ?',
+            (group_name, tournament_id, user_id),
+        )
+        self.conn.commit()
+
     def update_tournament_player_status(self, tournament_id: int, user_id: int, 
                                        status: str, approved_by: int = None):
         self.cursor.execute('''
@@ -960,10 +982,13 @@ class Database:
         self.conn.commit()
 
 
+import os
+
+USE_POSTGRES = bool(os.getenv("DATABASE_URL"))
+
 if USE_POSTGRES:
     from db.postgres import Database
     from db.postgres import AVAILABLE_FORMATS as AVAILABLE_FORMATS
-
 
 
 
