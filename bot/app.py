@@ -1426,6 +1426,73 @@ class TournamentBot:
                 )
                 await self._send_results_reply(context, chat_id, output_thread_id, full_text)
                 return
+
+            # Матч не найден в группе — пробуем найти playoff-матч
+            playoff_found = self._find_playoff_match_by_ocr_nicks(
+                ocr_p1_nick, ocr_p2_nick, tournament,
+            )
+            if playoff_found:
+                stage, playoff_match = playoff_found
+                wins_needed = 3 if stage in ('1/8', '1/4') else 4
+
+                pm1_nick = playoff_match.get('player1_nick') or ''
+                pm2_nick = playoff_match.get('player2_nick') or ''
+
+                if nick_key(pm1_nick) == ocr_k1:
+                    p1_wins, p2_wins = ocr_score1, ocr_score2
+                else:
+                    p1_wins, p2_wins = ocr_score2, ocr_score1
+
+                status = 'completed' if (p1_wins >= wins_needed or p2_wins >= wins_needed) else 'in_progress'
+
+                p1 = self.db.get_player_by_nick(pm1_nick)
+                p2 = self.db.get_player_by_nick(pm2_nick)
+                p1_before = p1['rating'] if p1 else 0
+                p2_before = p2['rating'] if p2 else 0
+
+                if status == 'completed':
+                    winner_nick = pm1_nick if p1_wins > p2_wins else pm2_nick
+                    loser_nick = pm2_nick if p1_wins > p2_wins else pm1_nick
+                    self.advance_playoff(tournament['id'], stage, playoff_match['match_num'], winner_nick, loser_nick)
+                    elo_delta_p1, elo_delta_p2 = self.submit_playoff_elo_games(
+                        pm1_nick, pm2_nick, p1_wins, p2_wins,
+                        playoff_match['id'], p1_before, p2_before,
+                    )
+
+                self.db.update_playoff_match(playoff_match['id'], p1_wins, p2_wins, status)
+                self.cooldowns[user_id] = current_time
+
+                # Обновляем сетку плей-офф
+                bracket_text = self.format_playoff_bracket(tournament['id'])
+                if tournament.get('playoff_message_id'):
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=tournament['chat_id'],
+                            message_id=tournament['playoff_message_id'],
+                            text=bracket_text,
+                            parse_mode='HTML',
+                            disable_web_page_preview=True,
+                        )
+                    except Exception as e:
+                        logger.error(f"Error editing playoff bracket after OCR: {e}")
+
+                result_text = f"✅ Записан результат {stage} #{playoff_match['match_num']}:\n"
+                result_text += f"{pm1_nick} {p1_wins}-{p2_wins} {pm2_nick}\n"
+                if status == 'completed':
+                    p1_sign = '+' if elo_delta_p1 >= 0 else ''
+                    p2_sign = '+' if elo_delta_p2 >= 0 else ''
+                    result_text += f"📈 ELO: {pm1_nick} {p1_sign}{elo_delta_p1} | {pm2_nick} {p2_sign}{elo_delta_p2}\n"
+                    if stage == 'final':
+                        result_text += f"🏆 {winner_nick} — чемпион турнира!"
+                    elif stage == 'bronze':
+                        result_text += f"🥉 {winner_nick} занимает 3 место!"
+                    else:
+                        result_text += f"🏆 {winner_nick} проходит в следующий раунд!"
+                else:
+                    result_text += f"⏳ {wins_needed} побед для прохода. Текущий счёт: {p1_wins}-{p2_wins}"
+
+                await self._send_results_reply(context, chat_id, output_thread_id, result_text)
+                return
             # Матч не найден по OCR-никам — фоллбэк на caption
 
         # --- Шаг 2: фоллбэк — резолвим матч из caption, счёт из скриншотов ---
@@ -1608,6 +1675,63 @@ class TournamentBot:
 
         if best_candidate and best_total >= 1.20:
             return best_candidate
+        return None
+
+    def _find_playoff_match_by_ocr_nicks(
+        self,
+        ocr_nick1: str,
+        ocr_nick2: str,
+        tournament: Dict,
+    ) -> Optional[Tuple[str, Dict]]:
+        """Find a pending playoff match by OCR-extracted nicks with fuzzy matching."""
+        def nick_key(n: str) -> str:
+            return (n or "").strip().casefold()
+
+        ocr_k1 = nick_key(ocr_nick1)
+        ocr_k2 = nick_key(ocr_nick2)
+        ocr1_norm = self.screenshot_analyzer.normalize_nick(ocr_nick1)
+        ocr2_norm = self.screenshot_analyzer.normalize_nick(ocr_nick2)
+
+        all_stages = ['1/8', '1/4', '1/2', 'bronze', 'final']
+        best_match = None
+        best_total = 0.0
+
+        for stage in all_stages:
+            matches = self.db.get_playoff_matches(tournament['id'], stage)
+            for m in matches:
+                if m.get('status') not in ('pending', 'in_progress'):
+                    continue
+                p1_nick = m.get('player1_nick') or ''
+                p2_nick = m.get('player2_nick') or ''
+                m1_key = nick_key(p1_nick)
+                m2_key = nick_key(p2_nick)
+
+                # Exact match first
+                if (m1_key == ocr_k1 and m2_key == ocr_k2) or (m1_key == ocr_k2 and m2_key == ocr_k1):
+                    return (stage, m)
+
+                # Fuzzy match
+                p1_norm = self.screenshot_analyzer.normalize_nick(p1_nick)
+                p2_norm = self.screenshot_analyzer.normalize_nick(p2_nick)
+                if not p1_norm or not p2_norm:
+                    continue
+
+                direct_total = (
+                    SequenceMatcher(None, ocr1_norm, p1_norm).ratio()
+                    + SequenceMatcher(None, ocr2_norm, p2_norm).ratio()
+                )
+                reverse_total = (
+                    SequenceMatcher(None, ocr1_norm, p2_norm).ratio()
+                    + SequenceMatcher(None, ocr2_norm, p1_norm).ratio()
+                )
+
+                total = max(direct_total, reverse_total)
+                if total > best_total:
+                    best_total = total
+                    best_match = (stage, m)
+
+        if best_match and best_total >= 1.20:
+            return best_match
         return None
 
     async def process_match_result(self, match: Dict, score1: int, score2: int,
