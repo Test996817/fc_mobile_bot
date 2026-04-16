@@ -2479,6 +2479,22 @@ class TournamentBot:
             winner_nick = target.get("player1_nick") if (target.get("player1_wins") or 0) > (target.get("player2_wins") or 0) else target.get("player2_nick")
             self._undo_playoff_advance(tournament["id"], stage, match_num, winner_nick)
 
+        self.db.update_playoff_match(target["id"], player1_wins=0, player2_wins=0, status="pending")
+
+        # Обновляем сетку плей-офф
+        bracket_text = self.format_playoff_bracket(tournament["id"])
+        if tournament.get("playoff_message_id"):
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=tournament["chat_id"],
+                    message_id=tournament["playoff_message_id"],
+                    text=bracket_text,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            except Exception as e:
+                logger.error(f"Error editing playoff bracket after undo: {e}")
+
         await update.message.reply_text(
             f"✅ Результат {stage} #{match_num} откатчен.\n"
             f"{target.get('player1_nick')} vs {target.get('player2_nick')} - ожидает результат."
