@@ -6,6 +6,61 @@ from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+ZONES_BY_RESOLUTION: Dict[Tuple[int, int], Dict[str, Tuple[int, int, int, int]]] = {
+    (2560, 1600): {
+        "team1": (494, 304, 609, 352),
+        "score": (1102, 268, 1472, 388),
+        "team2": (1900, 300, 2100, 350),
+    },
+    (1280, 591): {
+        "team1": (274, 60, 413, 103),
+        "score": (555, 49, 731, 109),
+        "team2": (879, 63, 1015, 103),
+    },
+    (1280, 576): {
+        "team1": (274, 60, 413, 103),
+        "score": (555, 49, 731, 109),
+        "team2": (879, 63, 1015, 103),
+    },
+    (1170, 540): {
+        "team1": (255, 61, 287, 77),
+        "score": (506, 44, 666, 96),
+        "team2": (851, 61, 927, 77),
+    },
+    (2414, 1080): {
+        "team1": (545, 119, 699, 187),
+        "score": (1055, 94, 1336, 190),
+        "team2": (1648, 116, 1890, 188),
+    },
+    (1280, 800): {
+        "team1": (267, 257, 349, 277),
+        "score": (553, 241, 733, 301),
+        "team2": (935, 256, 1030, 280),
+    },
+}
+
+
+def get_zones_for_resolution(img_w: int, img_h: int) -> Optional[Dict[str, Tuple[int, int, int, int]]]:
+    """Возвращает зоны для заданного разрешения или ближайшего."""
+    zones = ZONES_BY_RESOLUTION.get((img_w, img_h))
+    if zones:
+        return zones
+
+    for ref_res, ref_zones in ZONES_BY_RESOLUTION.items():
+        if abs(img_w - ref_res[0]) < 100:
+            return ref_zones
+
+    return None
+
+
+def scale_coords(
+    x1: int, y1: int, x2: int, y2: int, img_w: int, img_h: int, ref_w: int = 2560, ref_h: int = 1600
+) -> Tuple[int, int, int, int]:
+    """Масштабирует координаты под разрешение изображения."""
+    scale_x = img_w / ref_w
+    scale_y = img_h / ref_h
+    return (int(x1 * scale_x), int(y1 * scale_y), int(x2 * scale_x), int(y2 * scale_y))
+
 
 class ScreenshotAnalyzer:
     DEFAULT_MAX_PLAUSIBLE_SCORE = 20
@@ -24,7 +79,6 @@ class ScreenshotAnalyzer:
                 gpu=False,
                 verbose=False,
                 download_enabled=True,
-                paragraph_text=False,
             )
             self.ocr_available = True
             logger.info("EasyOCR module loaded successfully")
@@ -66,77 +120,50 @@ class ScreenshotAnalyzer:
             logger.error(f"EasyOCR error: {e}")
             return ""
 
-    def extract_fc_match_info(self, photo_path: str) -> Optional[Dict]:
-        """
-        Extracts player nicks and score from FC Mobile screenshot using coordinates.
-        Returns: {"player1_nick": str, "player2_nick": str, "score1": int, "score2": int}
-        or None if recognition failed.
+    def extract_teams_and_score(self, photo_path: str) -> Optional[Dict]:
+        """Распознаёт названия команд и счёт из скриншота FC Mobile.
+
+        Использует координаты зон, адаптированные под разрешение изображения.
+
+        Returns:
+            {"team1": str, "team2": str, "score": str} или None при ошибке.
         """
         if not self.ocr_available or not self.reader:
             return None
         try:
-            results = self.reader.readtext(photo_path, detail=1)
-        except Exception as e:
-            logger.error(f"EasyOCR error in extract_fc_match_info: {e}")
+            import cv2
+        except ImportError:
+            logger.warning("OpenCV not available for coordinate-based extraction")
             return None
-        if not results:
-            return None
-        score_pattern = re.compile(r'^(\d{1,2})\s*[-\u2013\u2014:]\s*(\d{1,2})$')
-        sorted_results = sorted(results, key=lambda r: (r[0][0][1], -r[2]))
-        score_info = None
-        for bbox, text, conf in sorted_results:
-            text_clean = text.strip()
-            m = score_pattern.match(text_clean)
-            if m:
-                s1, s2 = int(m.group(1)), int(m.group(2))
-                if 0 <= s1 <= self.max_plausible_score and 0 <= s2 <= self.max_plausible_score:
-                    center_x = (bbox[0][0] + bbox[2][0]) / 2
-                    center_y = (bbox[0][1] + bbox[2][1]) / 2
-                    score_info = {"score1": s1, "score2": s2, "center_x": center_x, "center_y": center_y}
-                    break
-        if not score_info:
-            return None
-        nick_candidates_left = []
-        nick_candidates_right = []
-        for bbox, text, conf in results:
-            text_clean = text.strip()
-            if not text_clean or len(text_clean) < 2:
-                continue
-            if score_pattern.match(text_clean):
-                continue
-            if text_clean.isdigit() and len(text_clean) <= 2:
-                continue
-            skip_words = {"GOAL", "CHANCES", "MY", "THEIR", "GREAT", "GOOD", "BASIC", "CONTINUE", "DARK", "BEASTS", "Aura", "Power"}
-            if text_clean.upper() in skip_words:
-                continue
-            center_x = (bbox[0][0] + bbox[2][0]) / 2
-            center_y = (bbox[0][1] + bbox[2][1]) / 2
-            y_diff = abs(center_y - score_info["center_y"])
-            if y_diff > 100:
-                continue
-            if center_x < score_info["center_x"]:
-                nick_candidates_left.append((text_clean, conf, center_x))
-            elif center_x > score_info["center_x"]:
-                nick_candidates_right.append((text_clean, conf, center_x))
 
-        def pick_best_nick(candidates: List[Tuple[str, float, float]]) -> Optional[str]:
-            if not candidates:
+        try:
+            img = cv2.imread(photo_path)
+            if img is None:
                 return None
-            candidates.sort(key=lambda c: (-c[1], abs(c[2] - score_info["center_x"])))
-            nick = candidates[0][0]
-            nick = re.sub(r'[^A-Za-z0-9_.\-]', '', nick)
-            return nick if nick else None
+            h, w = img.shape[:2]
+            zones = get_zones_for_resolution(w, h)
+            if not zones:
+                logger.warning(f"Unknown resolution {w}x{h}")
+                return None
 
-        player1_nick = pick_best_nick(nick_candidates_left)
-        player2_nick = pick_best_nick(nick_candidates_right)
-        if not player1_nick or not player2_nick:
+            result = {}
+            for label, (x1, y1, x2, y2) in zones.items():
+                roi = img[y1:y2, x1:x2]
+                ocr_result = self.reader.readtext(roi, detail=1)
+                if ocr_result:
+                    text = ocr_result[0][1].strip()
+                    result[label] = text
+
+            if len(result) >= 3:
+                return {
+                    "team1": result.get("team1", ""),
+                    "score": result.get("score", ""),
+                    "team2": result.get("team2", ""),
+                }
             return None
-        return {
-            "player1_nick": player1_nick,
-            "player2_nick": player2_nick,
-            "score1": score_info["score1"],
-            "score2": score_info["score2"],
-        }
+        except Exception as e:
+            logger.error(f"Error in extract_teams_and_score: {e}")
+            return None
 
     def extract_scores(self, text: str) -> Tuple[Optional[int], Optional[int]]:
         if not text:
