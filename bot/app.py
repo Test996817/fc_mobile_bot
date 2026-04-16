@@ -1224,6 +1224,8 @@ class TournamentBot:
                 if m.get('status') in ('pending', 'in_progress')
             ])
 
+        logger.info(f"_process_photos_batch: pending_matches={len(pending_matches)}, pending_playoff={len(pending_playoff)}, caption='{caption[:30] if caption else ''}'")
+
         # Если нет pending-матчей и нет caption — ошибка
         if not pending_matches and not pending_playoff and not caption:
             await self._send_results_reply(
