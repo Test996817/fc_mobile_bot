@@ -1205,8 +1205,18 @@ class TournamentBot:
             if m.get('status') in ('pending', 'in_progress')
         ]
 
-        # Если caption пустой и нет pending-матчей — ошибка
-        if not pending_matches and not caption:
+        # Проверяем также playoff-матчи
+        playoff_stages = ['1/8', '1/4', '1/2', 'bronze', 'final']
+        pending_playoff = []
+        for stage in playoff_stages:
+            playoff_matches = self.db.get_playoff_matches(tournament['id'], stage)
+            pending_playoff.extend([
+                m for m in playoff_matches
+                if m.get('status') in ('pending', 'in_progress')
+            ])
+
+        # Если нет pending-матчей и нет caption — ошибка
+        if not pending_matches and not pending_playoff and not caption:
             await self._send_results_reply(
                 context,
                 chat_id,
@@ -1215,8 +1225,8 @@ class TournamentBot:
             )
             return
 
-        # Если нет pending-матчей, но есть caption — пробуем playoff
-        if not pending_matches and caption:
+        # Если нет pending-матчей, но есть caption или есть pending playoff — пробуем playoff
+        if not pending_matches and (caption or pending_playoff):
             caption_nicks = self._extract_nicks_from_caption(caption)
             if caption_nicks:
                 playoff_found = self._find_playoff_match_by_nicks(
@@ -1537,6 +1547,23 @@ class TournamentBot:
         # Если caption не распознан как групповой матч — пробуем playoff
         if not caption_match:
             caption_nicks = self._extract_nicks_from_caption(caption)
+            
+            # Если caption пустой, но есть pending playoff — пробуем найти по OCR никам
+            if not caption_nicks and pending_playoff:
+                ocr_info = await self._try_extract_fc_match_info(photos, screenshots_dir)
+                if ocr_info:
+                    # Ищем playoff матч по OCR никам
+                    playoff_by_ocr = self._find_playoff_match_by_ocr_nicks(
+                        ocr_info['player1_nick'], ocr_info['player2_nick'], tournament,
+                    )
+                    if playoff_by_ocr:
+                        stage, playoff_match = playoff_by_ocr
+                        await self._submit_playoff_result_from_photo(
+                            context, chat_id, output_thread_id, output_thread_id,
+                            tournament, stage, playoff_match, ocr_info['score1'], ocr_info['score2'],
+                        )
+                        return
+            
             if caption_nicks:
                 playoff_found = self._find_playoff_match_by_nicks(
                     caption_nicks[0], caption_nicks[1], tournament,
