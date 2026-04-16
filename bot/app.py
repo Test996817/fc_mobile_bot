@@ -1543,6 +1543,19 @@ class TournamentBot:
                 )
                 if playoff_found:
                     stage, playoff_match = playoff_found
+                    
+                    # Пробуем extract_fc_match_info (более точный OCR)
+                    ocr_info = await self._try_extract_fc_match_info(photos, screenshots_dir)
+                    if ocr_info:
+                        ocr_score1 = ocr_info['score1']
+                        ocr_score2 = ocr_info['score2']
+                        await self._submit_playoff_result_from_photo(
+                            context, chat_id, output_thread_id, output_thread_id,
+                            tournament, stage, playoff_match, ocr_score1, ocr_score2,
+                        )
+                        return
+                    
+                    # Fallback: отдельное извлечение счёта
                     recognized_scores = await self._extract_scores_from_photos(photos, screenshots_dir, context)
                     if recognized_scores is None:
                         await self._send_results_reply(
