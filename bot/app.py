@@ -1497,7 +1497,33 @@ class TournamentBot:
 
         # --- Шаг 2: фоллбэк — резолвим матч из caption, счёт из скриншотов ---
         caption_match = resolve_match_by_text(caption)
+        
+        # Если caption не распознан как групповой матч — пробуем playoff
         if not caption_match:
+            caption_nicks = self._extract_nicks_from_caption(caption)
+            if caption_nicks:
+                playoff_found = self._find_playoff_match_by_nicks(
+                    caption_nicks[0], caption_nicks[1], tournament,
+                )
+                if playoff_found:
+                    stage, playoff_match = playoff_found
+                    recognized_scores = await self._extract_scores_from_photos(photos, screenshots_dir, context)
+                    if recognized_scores is None:
+                        await self._send_results_reply(
+                            context, chat_id, output_thread_id,
+                            "❌ Не удалось распознать счёт на скриншотах.",
+                        )
+                        return
+                    total = len(photos)
+                    total_s1 = sum(s1 for _, s1, _ in recognized_scores)
+                    total_s2 = sum(s2 for _, _, s2 in recognized_scores)
+                    p1_wins, p2_wins = total_s1, total_s2
+                    await self._submit_playoff_result_from_photo(
+                        context, chat_id, output_thread_id, output_thread_id,
+                        tournament, stage, playoff_match, p1_wins, p2_wins,
+                    )
+                    return
+            
             await self._send_results_reply(
                 context,
                 chat_id,
@@ -1733,6 +1759,161 @@ class TournamentBot:
         if best_match and best_total >= 1.20:
             return best_match
         return None
+
+    def _extract_nicks_from_caption(self, caption: str) -> Optional[Tuple[str, str]]:
+        """Extract player nicks from caption text."""
+        if not caption:
+            return None
+        cleaned = unicodedata.normalize("NFKC", caption)
+        cleaned = cleaned.replace("\u200f", "").replace("\u200e", "")
+        first_line = cleaned.strip().split('\n')[0]
+        m = re.search(r'(.+?)\s*(?:-|–|—|vs|VS|:){1}\s*(.+)', first_line)
+        if not m:
+            return None
+        left = m.group(1).replace('@', '').strip()
+        right = m.group(2).replace('@', '').strip()
+        if left and right:
+            return (left, right)
+        return None
+
+    def _find_playoff_match_by_nicks(
+        self,
+        nick1: str,
+        nick2: str,
+        tournament: Dict,
+    ) -> Optional[Tuple[str, Dict]]:
+        """Find a pending playoff match by nicks (exact/fuzzy matching)."""
+        def nick_key(n: str) -> str:
+            return (n or "").strip().casefold()
+
+        k1 = nick_key(nick1)
+        k2 = nick_key(nick2)
+        norm1 = self.screenshot_analyzer.normalize_nick(nick1)
+        norm2 = self.screenshot_analyzer.normalize_nick(nick2)
+
+        all_stages = ['1/8', '1/4', '1/2', 'bronze', 'final']
+        best_match = None
+        best_total = 0.0
+
+        for stage in all_stages:
+            matches = self.db.get_playoff_matches(tournament['id'], stage)
+            for m in matches:
+                if m.get('status') not in ('pending', 'in_progress'):
+                    continue
+                p1_nick = m.get('player1_nick') or ''
+                p2_nick = m.get('player2_nick') or ''
+                m1_key = nick_key(p1_nick)
+                m2_key = nick_key(p2_nick)
+
+                if (m1_key == k1 and m2_key == k2) or (m1_key == k2 and m2_key == k1):
+                    return (stage, m)
+
+                p1_norm = self.screenshot_analyzer.normalize_nick(p1_nick)
+                p2_norm = self.screenshot_analyzer.normalize_nick(p2_nick)
+                if not p1_norm or not p2_norm:
+                    continue
+
+                direct = SequenceMatcher(None, norm1, p1_norm).ratio() + SequenceMatcher(None, norm2, p2_norm).ratio()
+                reverse = SequenceMatcher(None, norm1, p2_norm).ratio() + SequenceMatcher(None, norm2, p1_norm).ratio()
+                total = max(direct, reverse)
+                if total > best_total:
+                    best_total = total
+                    best_match = (stage, m)
+
+        if best_match and best_total >= 1.20:
+            return best_match
+        return None
+
+    async def _extract_scores_from_photos(
+        self, photos, screenshots_dir: str, context,
+    ) -> Optional[List[Tuple[int, int, str]]]:
+        """Extract scores from all photos. Returns list of (score1, score2, file_id) or None."""
+        recognized_scores = []
+        unrecognized = []
+
+        for i, photo in enumerate(photos, start=1):
+            try:
+                photo_file = await context.bot.get_file(photo.file_id)
+                safe_file_id = re.sub(r"[^A-Za-z0-9_-]+", "_", photo.file_id)
+                safe_file_id = safe_file_id[:120] if safe_file_id else f"photo_{i}"
+                photo_path = os.path.join(screenshots_dir, f"match_{safe_file_id}.jpg")
+                await photo_file.download_to_drive(photo_path)
+
+                screenshot_text = self.screenshot_analyzer.extract_text(photo_path)
+                score1, score2 = self.screenshot_analyzer.extract_scores(screenshot_text)
+
+                if score1 is None or score2 is None:
+                    unrecognized.append(i)
+                    continue
+                recognized_scores.append((score1, score2, photo.file_id))
+            except Exception as e:
+                logger.error(f"Error processing photo {photo.file_id}: {e}")
+                unrecognized.append(i)
+
+        if not recognized_scores:
+            return None
+        return recognized_scores
+
+    async def _submit_playoff_result_from_photo(
+        self, context, chat_id, output_thread_id, thread_id,
+        tournament, stage, playoff_match, p1_wins, p2_wins,
+    ):
+        """Submit playoff result from photo handler."""
+        wins_needed = 3 if stage in ('1/8', '1/4') else 4
+        status = 'completed' if (p1_wins >= wins_needed or p2_wins >= wins_needed) else 'in_progress'
+
+        pm1_nick = playoff_match.get('player1_nick') or ''
+        pm2_nick = playoff_match.get('player2_nick') or ''
+
+        p1 = self.db.get_player_by_nick(pm1_nick)
+        p2 = self.db.get_player_by_nick(pm2_nick)
+        p1_before = p1['rating'] if p1 else 0
+        p2_before = p2['rating'] if p2 else 0
+
+        elo_delta_p1 = 0
+        elo_delta_p2 = 0
+        winner_nick = None
+
+        if status == 'completed':
+            winner_nick = pm1_nick if p1_wins > p2_wins else pm2_nick
+            loser_nick = pm2_nick if p1_wins > p2_wins else pm1_nick
+            self.advance_playoff(tournament['id'], stage, playoff_match['match_num'], winner_nick, loser_nick)
+            elo_delta_p1, elo_delta_p2 = self.submit_playoff_elo_games(
+                pm1_nick, pm2_nick, p1_wins, p2_wins,
+                playoff_match['id'], p1_before, p2_before,
+            )
+
+        self.db.update_playoff_match(playoff_match['id'], p1_wins, p2_wins, status)
+
+        bracket_text = self.format_playoff_bracket(tournament['id'])
+        if tournament.get('playoff_message_id'):
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=tournament['chat_id'],
+                    message_id=tournament['playoff_message_id'],
+                    text=bracket_text,
+                    parse_mode='HTML',
+                    disable_web_page_preview=True,
+                )
+            except Exception as e:
+                logger.error(f"Error editing playoff bracket: {e}")
+
+        result_text = f"✅ Записан результат {stage} #{playoff_match['match_num']}:\n"
+        result_text += f"{pm1_nick} {p1_wins}-{p2_wins} {pm2_nick}\n"
+        if status == 'completed':
+            p1_sign = '+' if elo_delta_p1 >= 0 else ''
+            p2_sign = '+' if elo_delta_p2 >= 0 else ''
+            result_text += f"📈 ELO: {pm1_nick} {p1_sign}{elo_delta_p1} | {pm2_nick} {p2_sign}{elo_delta_p2}\n"
+            if stage == 'final':
+                result_text += f"🏆 {winner_nick} — чемпион турнира!"
+            elif stage == 'bronze':
+                result_text += f"🥉 {winner_nick} занимает 3 место!"
+            else:
+                result_text += f"🏆 {winner_nick} проходит в следующий раунд!"
+        else:
+            result_text += f"⏳ {wins_needed} побед для прохода. Текущий счёт: {p1_wins}-{p2_wins}"
+
+        await self._send_results_reply(context, chat_id, output_thread_id, result_text)
 
     async def process_match_result(self, match: Dict, score1: int, score2: int,
                                   winner_id: int, reported_by: int, screenshot_id: str = None,
