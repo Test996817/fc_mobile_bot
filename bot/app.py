@@ -1228,6 +1228,7 @@ class TournamentBot:
 
         # Если нет pending-матчей и нет caption — ошибка
         if not pending_matches and not pending_playoff and not caption:
+            logger.info("_process_photos_batch: No pending matches, no caption - returning error")
             await self._send_results_reply(
                 context,
                 chat_id,
