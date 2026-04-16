@@ -1368,7 +1368,7 @@ class TournamentBot:
                         best_total = total
                         best_candidate = candidate
 
-                if best_candidate and best_total >= 1.20:
+                if best_candidate and best_total >= 1.10:
                     return best_candidate
 
             def resolve_caption_user(raw_nick: str):
@@ -1691,13 +1691,24 @@ class TournamentBot:
                 photo_path = os.path.join(screenshots_dir, f"match_{safe_file_id}.jpg")
                 await photo_file.download_to_drive(photo_path)
 
-                info = self.screenshot_analyzer.extract_fc_match_info(photo_path)
+                info = self.screenshot_analyzer.extract_teams_and_score(photo_path)
                 if info:
+                    score_text = info.get("score", "")
+                    score_parts = re.split(r"[\s\-:]+", score_text.replace("-", " "))
+                    score1 = int(score_parts[0]) if score_parts and score_parts[0].isdigit() else 0
+                    score2 = int(score_parts[-1]) if score_parts and score_parts[-1].isdigit() else 0
+
+                    result = {
+                        "player1_nick": info.get("team1", ""),
+                        "player2_nick": info.get("team2", ""),
+                        "score1": score1,
+                        "score2": score2,
+                    }
                     logger.info(
-                        f"OCR extracted: {info['player1_nick']} "
-                        f"{info['score1']}:{info['score2']} {info['player2_nick']}"
+                        f"OCR extracted: {result['player1_nick']} "
+                        f"{result['score1']}:{result['score2']} {result['player2_nick']}"
                     )
-                    return info
+                    return result
             except Exception as e:
                 logger.error(f"Error in _try_extract_fc_match_info photo {i}: {e}")
         return None
@@ -1748,7 +1759,7 @@ class TournamentBot:
                 best_total = total
                 best_candidate = candidate
 
-        if best_candidate and best_total >= 1.20:
+        if best_candidate and best_total >= 1.10:
             return best_candidate
         return None
 
@@ -1805,7 +1816,7 @@ class TournamentBot:
                     best_total = total
                     best_match = (stage, m)
 
-        if best_match and best_total >= 1.20:
+        if best_match and best_total >= 1.10:
             return best_match
         return None
 
@@ -1869,7 +1880,7 @@ class TournamentBot:
                     best_total = total
                     best_match = (stage, m)
 
-        if best_match and best_total >= 1.20:
+        if best_match and best_total >= 1.10:
             return best_match
         return None
 
