@@ -1240,6 +1240,22 @@ class TournamentBot:
         # Если нет pending-матчей, но есть caption или есть pending playoff — пробуем playoff
         if not pending_matches and (caption or pending_playoff):
             caption_nicks = self._extract_nicks_from_caption(caption)
+            
+            # Если caption пустой, но есть pending playoff - пробуем OCR
+            if not caption_nicks and pending_playoff:
+                ocr_info = await self._try_extract_fc_match_info(photos, screenshots_dir)
+                if ocr_info:
+                    playoff_by_ocr = self._find_playoff_match_by_ocr_nicks(
+                        ocr_info['player1_nick'], ocr_info['player2_nick'], tournament,
+                    )
+                    if playoff_by_ocr:
+                        stage, playoff_match = playoff_by_ocr
+                        await self._submit_playoff_result_from_photo(
+                            context, chat_id, output_thread_id, output_thread_id,
+                            tournament, stage, playoff_match, ocr_info['score1'], ocr_info['score2'],
+                        )
+                        return
+            
             if caption_nicks:
                 playoff_found = self._find_playoff_match_by_nicks(
                     caption_nicks[0], caption_nicks[1], tournament,
