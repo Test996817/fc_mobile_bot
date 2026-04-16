@@ -1205,7 +1205,43 @@ class TournamentBot:
             if m.get('status') in ('pending', 'in_progress')
         ]
 
-        if not pending_matches:
+        # Если caption пустой и нет pending-матчей — ошибка
+        if not pending_matches and not caption:
+            await self._send_results_reply(
+                context,
+                chat_id,
+                output_thread_id,
+                "❌ Нет ожидающих матчей для отправки результата.",
+            )
+            return
+
+        # Если нет pending-матчей, но есть caption — пробуем playoff
+        if not pending_matches and caption:
+            caption_nicks = self._extract_nicks_from_caption(caption)
+            if caption_nicks:
+                playoff_found = self._find_playoff_match_by_nicks(
+                    caption_nicks[0], caption_nicks[1], tournament,
+                )
+                if playoff_found:
+                    stage, playoff_match = playoff_found
+                    recognized_scores = await self._extract_scores_from_photos(photos, screenshots_dir, context)
+                    if recognized_scores is None:
+                        await self._send_results_reply(
+                            context, chat_id, output_thread_id,
+                            "❌ Не удалось распознать счёт на скриншотах.",
+                        )
+                        return
+                    total = len(photos)
+                    total_s1 = sum(s1 for _, s1, _ in recognized_scores)
+                    total_s2 = sum(s2 for _, _, s2 in recognized_scores)
+                    p1_wins, p2_wins = total_s1, total_s2
+                    await self._submit_playoff_result_from_photo(
+                        context, chat_id, output_thread_id, output_thread_id,
+                        tournament, stage, playoff_match, p1_wins, p2_wins,
+                    )
+                    return
+            
+            # Caption есть, но не распознан и нет pending-матчей
             await self._send_results_reply(
                 context,
                 chat_id,
