@@ -1226,60 +1226,23 @@ class TournamentBot:
 
         logger.info(f"_process_photos_batch: pending_matches={len(pending_matches)}, pending_playoff={len(pending_playoff)}, caption='{caption[:30] if caption else ''}'")
 
-        # Если нет pending-матчей и нет caption — ошибка
-        if not pending_matches and not pending_playoff and not caption:
-            logger.info("_process_photos_batch: No pending matches, no caption - returning error")
-            await self._send_results_reply(
-                context,
-                chat_id,
-                output_thread_id,
-                "❌ Нет ожидающих матчей для отправки результата.",
-            )
-            return
-
-        # Если нет pending-матчей, но есть caption или есть pending playoff — пробуем playoff
-        if not pending_matches and (caption or pending_playoff):
-            caption_nicks = self._extract_nicks_from_caption(caption)
-            
-            # Если caption пустой, но есть pending playoff - пробуем OCR
-            if not caption_nicks and pending_playoff:
-                ocr_info = await self._try_extract_fc_match_info(photos, screenshots_dir)
-                if ocr_info:
-                    playoff_by_ocr = self._find_playoff_match_by_ocr_nicks(
-                        ocr_info['player1_nick'], ocr_info['player2_nick'], tournament,
-                    )
-                    if playoff_by_ocr:
-                        stage, playoff_match = playoff_by_ocr
-                        await self._submit_playoff_result_from_photo(
-                            context, chat_id, output_thread_id, output_thread_id,
-                            tournament, stage, playoff_match, ocr_info['score1'], ocr_info['score2'],
-                        )
-                        return
-            
-            if caption_nicks:
-                playoff_found = self._find_playoff_match_by_nicks(
-                    caption_nicks[0], caption_nicks[1], tournament,
+        # Если есть pending playoff - пробуем OCR
+        if pending_playoff:
+            ocr_info = await self._try_extract_fc_match_info(photos, screenshots_dir)
+            if ocr_info:
+                playoff_by_ocr = self._find_playoff_match_by_ocr_nicks(
+                    ocr_info['player1_nick'], ocr_info['player2_nick'], tournament,
                 )
-                if playoff_found:
-                    stage, playoff_match = playoff_found
-                    recognized_scores = await self._extract_scores_from_photos(photos, screenshots_dir, context)
-                    if recognized_scores is None:
-                        await self._send_results_reply(
-                            context, chat_id, output_thread_id,
-                            "❌ Не удалось распознать счёт на скриншотах.",
-                        )
-                        return
-                    total = len(photos)
-                    total_s1 = sum(s1 for _, s1, _ in recognized_scores)
-                    total_s2 = sum(s2 for _, _, s2 in recognized_scores)
-                    p1_wins, p2_wins = total_s1, total_s2
+                if playoff_by_ocr:
+                    stage, playoff_match = playoff_by_ocr
                     await self._submit_playoff_result_from_photo(
                         context, chat_id, output_thread_id, output_thread_id,
-                        tournament, stage, playoff_match, p1_wins, p2_wins,
+                        tournament, stage, playoff_match, ocr_info['score1'], ocr_info['score2'],
                     )
                     return
-            
-            # Caption есть, но не распознан и нет pending-матчей
+
+        # Если нет pending-матчей — ошибка
+        if not pending_matches:
             await self._send_results_reply(
                 context,
                 chat_id,
