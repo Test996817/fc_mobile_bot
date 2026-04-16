@@ -1226,18 +1226,18 @@ class TournamentBot:
 
         logger.info(f"_process_photos_batch: pending_matches={len(pending_matches)}, pending_playoff={len(pending_playoff)}, caption='{caption[:30] if caption else ''}'")
 
-        # Если есть pending playoff - пробуем OCR
+        # Если есть pending playoff - пробуем OCR все фото
         if pending_playoff:
-            ocr_info = await self._try_extract_fc_match_info(photos, screenshots_dir)
-            if ocr_info:
+            ocr_results = await self._extract_all_playoff_results(photos, screenshots_dir)
+            if ocr_results:
                 playoff_by_ocr = self._find_playoff_match_by_ocr_nicks(
-                    ocr_info['player1_nick'], ocr_info['player2_nick'], tournament,
+                    ocr_results['player1_nick'], ocr_results['player2_nick'], tournament,
                 )
                 if playoff_by_ocr:
                     stage, playoff_match = playoff_by_ocr
                     await self._submit_playoff_result_from_photo(
                         context, chat_id, output_thread_id, output_thread_id,
-                        tournament, stage, playoff_match, ocr_info['score1'], ocr_info['score2'],
+                        tournament, stage, playoff_match, ocr_results['p1_wins'], ocr_results['p2_wins'],
                     )
                     return
 
@@ -1730,6 +1730,60 @@ class TournamentBot:
             except Exception as e:
                 logger.error(f"Error in _try_extract_fc_match_info photo {i}: {e}")
         return None
+
+    async def _extract_all_playoff_results(
+        self, photos, screenshots_dir: str,
+    ) -> Optional[Dict]:
+        """Extract all photos and calculate total wins for playoff."""
+        p1_wins = 0
+        p2_wins = 0
+        player1_nick = None
+        player2_nick = None
+        processed = 0
+
+        for i, photo in enumerate(photos, start=1):
+            try:
+                photo_file = await self.application.bot.get_file(photo.file_id)
+                safe_file_id = re.sub(r"[^A-Za-z0-9_-]+", "_", photo.file_id)
+                safe_file_id = safe_file_id[:120] if safe_file_id else f"photo_{i}"
+                photo_path = os.path.join(screenshots_dir, f"match_{safe_file_id}.jpg")
+                await photo_file.download_to_drive(photo_path)
+
+                info = self.screenshot_analyzer.extract_teams_and_score(photo_path)
+                if not info:
+                    continue
+
+                score_text = info.get("score", "")
+                score_parts = re.split(r"[\s\-:]+", score_text.replace("-", " "))
+                score1 = int(score_parts[0]) if score_parts and score_parts[0].isdigit() else 0
+                score2 = int(score_parts[-1]) if score_parts and score_parts[-1].isdigit() else 0
+
+                if player1_nick is None:
+                    player1_nick = info.get("team1", "")
+                    player2_nick = info.get("team2", "")
+
+                if score1 > score2:
+                    p1_wins += 1
+                elif score2 > score1:
+                    p2_wins += 1
+
+                processed += 1
+                logger.info(f"Photo {i}: {player1_nick} {score1}-{score2} {player2_nick} -> p1_wins={p1_wins}, p2_wins={p2_wins}")
+
+            except Exception as e:
+                logger.error(f"Error in _extract_all_playoff_results photo {i}: {e}")
+
+        if not player1_nick or not player2_nick:
+            return None
+
+        logger.info(f"Total: {player1_nick} {p1_wins}-{p2_wins} {player2_nick} (processed {processed} photos)")
+
+        return {
+            "player1_nick": player1_nick,
+            "player2_nick": player2_nick,
+            "p1_wins": p1_wins,
+            "p2_wins": p2_wins,
+        }
 
     def _find_match_by_ocr_nicks(
         self,
