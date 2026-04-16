@@ -1094,8 +1094,10 @@ class TournamentBot:
         )
     
     async def handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        logger.info(f"handle_photo called: chat={update.effective_chat.id}, user={update.effective_user.id}")
         msg = update.message
         if not msg or not msg.photo:
+            logger.warning(f"handle_photo: no message or photo. msg={msg is not None}, photo={msg.photo if msg else None}")
             return
 
         photo = msg.photo[-1]
@@ -1170,16 +1172,20 @@ class TournamentBot:
     ):
         import time
 
+        logger.info(f"_process_photos_batch called: chat={chat_id}, user={user_id}, photos_count={len(photos)}")
+        
         screenshots_dir = "screenshots"
         os.makedirs(screenshots_dir, exist_ok=True)
 
         is_admin = self.db.is_admin(user_id)
         player = self.db.get_player(user_id)
         if not player and not is_admin:
+            logger.info(f"_process_photos_batch: user {user_id} not a player and not admin")
             return
 
         tournament = self.db.get_tournament_by_chat(chat_id)
         if not tournament:
+            logger.info(f"_process_photos_batch: no tournament for chat {chat_id}")
             return
 
         results_topic_id = tournament.get('results_topic_id')
