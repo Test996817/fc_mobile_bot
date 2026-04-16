@@ -1191,7 +1191,10 @@ class TournamentBot:
         results_topic_id = tournament.get('results_topic_id')
         output_thread_id = results_topic_id or thread_id
         if results_topic_id and thread_id != results_topic_id:
+            logger.info(f"_process_photos_batch: wrong thread. thread_id={thread_id}, results_topic_id={results_topic_id}")
             return
+
+        logger.info(f"_process_photos_batch: tournament found, id={tournament['id']}, results_topic={results_topic_id}")
 
         current_time = time.time()
         if (not is_admin) and user_id in self.cooldowns:
