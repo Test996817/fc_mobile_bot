@@ -1235,9 +1235,32 @@ class TournamentBot:
                 )
                 if playoff_by_ocr:
                     stage, playoff_match = playoff_by_ocr
+                    
+                    # Сопоставляем OCR результаты с базой данных
+                    pm1_nick = playoff_match.get('player1_nick', '')
+                    pm2_nick = playoff_match.get('player2_nick', '')
+                    
+                    # Определяем правильный порядок побед
+                    def nick_key(n): return (n or '').strip().casefold()
+                    
+                    ocr_k1 = nick_key(ocr_results['player1_nick'])
+                    ocr_k2 = nick_key(ocr_results['player2_nick'])
+                    db_k1 = nick_key(pm1_nick)
+                    db_k2 = nick_key(pm2_nick)
+                    
+                    # Если OCR team1 соответствует DB player2, меняем местами
+                    if ocr_k1 == db_k2 and ocr_k2 == db_k1:
+                        final_p1_wins = ocr_results['p2_wins']
+                        final_p2_wins = ocr_results['p1_wins']
+                    else:
+                        final_p1_wins = ocr_results['p1_wins']
+                        final_p2_wins = ocr_results['p2_wins']
+                    
+                    logger.info(f"Final wins: {pm1_nick}={final_p1_wins}, {pm2_nick}={final_p2_wins}")
+                    
                     await self._submit_playoff_result_from_photo(
                         context, chat_id, output_thread_id, output_thread_id,
-                        tournament, stage, playoff_match, ocr_results['p1_wins'], ocr_results['p2_wins'],
+                        tournament, stage, playoff_match, final_p1_wins, final_p2_wins,
                     )
                     return
 
