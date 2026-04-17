@@ -1618,107 +1618,15 @@ class TournamentBot:
                 context,
                 chat_id,
                 output_thread_id,
-                "Не удалось распознать игроков. Укажи @nick1 - @nick2 в подписи к скриншотам.",
-            )
-            return
-        match, cp1, cp2 = caption_match
-
-        recognized_scores = []
-        unrecognized = []
-
-        for i, photo in enumerate(photos, start=1):
-            try:
-                photo_file = await context.bot.get_file(photo.file_id)
-                safe_file_id = re.sub(r"[^A-Za-z0-9_-]+", "_", photo.file_id)
-                safe_file_id = safe_file_id[:120] if safe_file_id else f"photo_{i}"
-                photo_path = os.path.join(screenshots_dir, f"match_{safe_file_id}.jpg")
-                await photo_file.download_to_drive(photo_path)
-
-                screenshot_text = self.screenshot_analyzer.extract_text(photo_path)
-                score1, score2 = self.screenshot_analyzer.extract_scores(screenshot_text)
-
-                if score1 is None or score2 is None:
-                    unrecognized.append(i)
-                    continue
-                recognized_scores.append((i, score1, score2, photo.file_id))
-            except Exception as e:
-                logger.error(f"Error processing photo {photo.file_id}: {e}")
-                unrecognized.append(i)
-
-        total = len(photos)
-        if not recognized_scores:
-            text = (
-                "❌ Не удалось распознать счёт на скриншотах.\n"
-                "Проверь качество скрина или внеси результат вручную через /gresult."
-            )
-            await self._send_results_reply(context, chat_id, output_thread_id, text)
-            return
-
-        if len(recognized_scores) != total:
-            per_screen = ", ".join([f"#{idx} {s1}:{s2}" for idx, s1, s2, _ in recognized_scores])
-            text = (
-                "❌ Обнаружен неполный/неоднозначный набор счётов, результат не записан.\n"
-                f"Распознано скринов: {len(recognized_scores)}/{total}"
-            )
-            if per_screen:
-                text += f"\nСчета по скринам: {per_screen}"
-            if unrecognized:
-                text += f"\n⚠️ Не распознано скринов: {', '.join(map(str, unrecognized))}"
-            text += "\nОтправь скрины повторно или внеси результат вручную через /gresult."
-            await self._send_results_reply(context, chat_id, output_thread_id, text)
-            return
-
-        total_s1 = sum(s1 for _, s1, _, _ in recognized_scores)
-        total_s2 = sum(s2 for _, _, s2, _ in recognized_scores)
-        chosen_file_id = recognized_scores[0][3]
-        score_by_user = {
-            cp1['user_id']: total_s1,
-            cp2['user_id']: total_s2,
-        }
-        p1_score = score_by_user.get(match['player1_id'])
-        p2_score = score_by_user.get(match['player2_id'])
-
-        if p1_score is None or p2_score is None:
-            await self._send_results_reply(
-                context,
-                chat_id,
-                output_thread_id,
-                "❌ Подпись не соответствует участникам матча. Используй /gresult.",
+                "❌ Не удалось распознать результат на скриншотах.",
             )
             return
 
-        if p1_score > p2_score:
-            winner_id = match['player1_id']
-        elif p2_score > p1_score:
-            winner_id = match['player2_id']
-        else:
-            winner_id = None
+    def _extract_nicks_from_caption(self, caption: str) -> Optional[Tuple[str, str]]:
+        return None
 
-        match_notification = await self.process_match_result(
-            match,
-            p1_score,
-            p2_score,
-            winner_id,
-            user_id,
-            chosen_file_id,
-            send_notification=False,
-        )
-        self.cooldowns[user_id] = current_time
-
-        p1 = self.db.get_player(match['player1_id'])
-        p2 = self.db.get_player(match['player2_id'])
-        p1_nick = self._copyable_nick(p1.get('ingame_nick'))
-        p2_nick = self._copyable_nick(p2.get('ingame_nick'))
-        per_screen = ", ".join([f"#{idx} {s1}:{s2}" for idx, s1, s2, _ in recognized_scores])
-        ocr_summary = f"✅ Результат записан (сумма игр): {p1_nick} {p1_score}:{p2_score} {p2_nick}"
-        ocr_summary += f"\nРаспознано скринов: {len(recognized_scores)}/{total}"
-        if per_screen:
-            ocr_summary += f"\nСчета по скринам: {per_screen}"
-        if unrecognized:
-            ocr_summary += f"\n⚠️ Не распознано скринов: {', '.join(map(str, unrecognized))}"
-
-        full_text = f"{match_notification}\n\n{ocr_summary}" if match_notification else ocr_summary
-        await self._send_results_reply(context, chat_id, output_thread_id, full_text)
+    def resolve_match_by_text(self, source_text: str):
+        return None
 
     async def _try_extract_fc_match_info(
         self, photos, screenshots_dir: str,
