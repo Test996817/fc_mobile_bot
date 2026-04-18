@@ -53,6 +53,7 @@ class TournamentBot:
         self.setup_handlers()
     
     def setup_handlers(self):
+        self.application.add_handler(CommandHandler("admin", self.cmd_admin))
         self.application.add_handler(MessageHandler(
             filters.Regex(r'^RESULTS_TOPIC$'),
             self.handle_results_topic_message
