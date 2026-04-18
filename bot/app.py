@@ -11,10 +11,12 @@ from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
-from dotenv import load_dotenv
-load_dotenv()
+from config.runtime import load_runtime_env
+
+load_runtime_env()
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -26,13 +28,8 @@ from telegram.ext import (
 
 from services import EloCalculator, ScreenshotAnalyzer, GraphicsRenderer
 
-USE_POSTGRES = bool(os.getenv('DATABASE_URL'))
-if USE_POSTGRES:
-    from db.postgres import Database
-    from db.postgres import AVAILABLE_FORMATS as AVAILABLE_FORMATS
-else:
-    from db.sqlite import Database
-    from db.sqlite import AVAILABLE_FORMATS
+from db.postgres import Database
+from db.postgres import AVAILABLE_FORMATS as AVAILABLE_FORMATS
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -2628,13 +2625,9 @@ class TournamentBot:
 
         size_text = 'n/a'
         try:
-            if USE_POSTGRES:
-                self.db.cursor.execute("SELECT pg_database_size(current_database())")
-                row = self.db.cursor.fetchone()
-                size_bytes = row[0] if row is not None else 0
-            else:
-                db_path = os.path.join(os.getcwd(), 'tournament_bot.db')
-                size_bytes = os.path.getsize(db_path) if os.path.exists(db_path) else 0
+            self.db.cursor.execute("SELECT pg_database_size(current_database())")
+            row = self.db.cursor.fetchone()
+            size_bytes = row[0] if row is not None else 0
             size_text = f"{size_bytes / (1024 * 1024):.2f} MB"
         except Exception:
             pass
