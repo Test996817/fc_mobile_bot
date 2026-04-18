@@ -53,52 +53,14 @@ class TournamentBot:
         self.setup_handlers()
     
     def setup_handlers(self):
-        self.application.add_handler(CommandHandler("admin", self.cmd_admin))
-        self.application.add_handler(CommandHandler("tournament_create", self.cmd_create_tournament))
-        self.application.add_handler(CommandHandler("tournament_start", self.cmd_start_tournament))
-        self.application.add_handler(CommandHandler("tournament_end", self.cmd_end_tournament))
-        self.application.add_handler(CommandHandler("allmatches", self.cmd_matches))
-        self.application.add_handler(CommandHandler("playoff", self.cmd_playoff))
-        self.application.add_handler(CommandHandler("pw", self.cmd_playoff_win))
-        self.application.add_handler(CommandHandler("elo", self.cmd_elo))
-        self.application.add_handler(CommandHandler("tp", self.cmd_tech_loss))
-        self.application.add_handler(CommandHandler("replace", self.cmd_replace))
-        self.application.add_handler(CommandHandler("removeplayer", self.cmd_remove_player))
-        self.application.add_handler(CommandHandler("cancelmatch", self.cmd_cancel_match))
-        self.application.add_handler(CommandHandler("notifyall", self.cmd_notify_all))
-        self.application.add_handler(CommandHandler("gresult", self.cmd_gresult))
-        self.application.add_handler(CommandHandler("refreshreg", self.cmd_refresh_reg))
-        self.application.add_handler(CommandHandler("regen_matches", self.cmd_regen_matches))
-        self.application.add_handler(CommandHandler("resetelo", self.cmd_resetelo))
-        self.application.add_handler(CommandHandler("rewrite", self.cmd_rewrite_result))
-        self.application.add_handler(CommandHandler("tinfo", self.cmd_tinfo))
-        self.application.add_handler(CommandHandler("dbstats", self.cmd_dbstats))
-        self.application.add_handler(CommandHandler("finalpost", self.cmd_finalpost))
-        self.application.add_handler(CommandHandler("gtable", self.cmd_groups_graphic))
-        self.application.add_handler(CommandHandler("pbracket", self.cmd_playoff_graphic))
-        self.application.add_handler(CommandHandler("resend_groups", self.cmd_resend_groups))
-        self.application.add_handler(CommandHandler("undo_playoff", self.cmd_undo_playoff))
-
         self.application.add_handler(MessageHandler(
-            filters.Regex(r'^!nick\s+(\S.+)'), 
-            self.cmd_set_nick
-        ))
-        self.application.add_handler(MessageHandler(
-            filters.Regex(r'^!profile'), 
-            self.cmd_profile
-        ))
-        self.application.add_handler(MessageHandler(
-            filters.Regex(r'^!matches'), 
-            self.cmd_my_matches
-        ))
-        self.application.add_handler(MessageHandler(
-            filters.Regex(r'^!commands'), 
-            self.cmd_commands
-        ))
-        self.application.add_handler(MessageHandler(
-            filters.Regex(r'^RESULTS_TOPIC$'), 
+            filters.Regex(r'^RESULTS_TOPIC$'),
             self.handle_results_topic_message
-        ))
+        ), group=0)
+        self.application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            self.handle_freeform_commands
+        ), group=1)
         self.application.add_handler(MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.Regex(r'(?i)^\s*\+\s*рез\b'),
             self.handle_gresult_text
@@ -151,15 +113,209 @@ class TournamentBot:
     async def cmd_commands(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             "📋 КОМАНДЫ:\n\n"
-            "!nick [ник] - установить игровой ник\n"
-            "!profile - твой профиль и статистика\n"
-            "!matches - твои матчи\n"
-            "/elo - таблица рейтинга\n\n"
+            "вса мой ник [ник] - установить игровой ник\n"
+            "вса мой профиль - твой профиль и статистика\n"
+            "вса мои матчи - твои матчи\n"
+            "вса команды - список команд\n\n"
             "📸 Отправь 4 скриншота с результатом в топик результатов:\n"
             "@Player1 - @Player2"
         )
         await update.message.reply_text(text)
-    
+
+    async def _call_with_args(
+        self,
+        handler,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        args: List[str],
+    ):
+        original_args = list(getattr(context, "args", []) or [])
+        context.args = list(args)
+        try:
+            await handler(update, context)
+        finally:
+            context.args = original_args
+
+    async def _set_nick_for_user(self, update: Update, nick: str):
+        user_id = update.effective_user.id
+        nick = (nick or "").strip()
+
+        if len(nick) < 2 or len(nick) > 30:
+            await update.message.reply_text("Ник должен быть от 2 до 30 символов.")
+            return
+
+        old_player = self.db.get_player_by_nick(nick)
+        if old_player and old_player['user_id'] != user_id:
+            await update.message.reply_text("Этот ник уже используется другим игроком.")
+            return
+
+        self.db.add_player(user_id, update.effective_user.username or str(user_id), nick)
+        await update.message.reply_text(f"✅ Ник установлен: {nick}")
+
+    def _parse_tournament_alias(self, body: str) -> Optional[List[str]]:
+        normalized = re.sub(r"\s+", " ", body).strip()
+        if not normalized:
+            return None
+
+        parts = normalized.split(" ")
+        if len(parts) == 1:
+            return [parts[0], "classical"]
+
+        last = parts[-1]
+        if last in AVAILABLE_FORMATS:
+            name = " ".join(parts[:-1]).strip()
+            if not name:
+                return None
+            return [*name.split(" "), last]
+
+        return [*parts, "classical"]
+
+    async def _handle_vsa_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE, rest: str):
+        normalized = re.sub(r"\s+", " ", rest).strip()
+        lower = normalized.casefold()
+
+        if lower.startswith("мой ник"):
+            nick = normalized[len("мой ник"):].strip()
+            if not nick:
+                await update.message.reply_text("Использование: vsa мой ник [ник]")
+                return
+            await self._set_nick_for_user(update, nick)
+            return
+
+        if lower == "мой профиль":
+            await self.cmd_profile(update, context)
+            return
+
+        if lower == "мои матчи":
+            await self.cmd_my_matches(update, context)
+            return
+
+        if lower == "команды":
+            await self.cmd_commands(update, context)
+            return
+
+        await update.message.reply_text("Неизвестная команда. Используй: vsa команды")
+
+    async def _handle_admin_freeform_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+        normalized = re.sub(r"\s+", " ", text).strip()
+        lower = normalized.casefold()
+
+        if lower.startswith("тп "):
+            nick = normalized[3:].strip()
+            if not nick:
+                await update.message.reply_text("Использование: тп [ник]")
+                return
+            await self._call_with_args(self.cmd_tech_loss, update, context, [nick])
+            return
+
+        if not normalized or normalized[0] not in {"+", "-"}:
+            return
+
+        sign = normalized[0]
+        body = normalized[1:].strip()
+        body = re.sub(r"\s+", " ", body)
+        body_lower = body.casefold()
+
+        if body_lower.startswith("рез "):
+            return
+
+        if body_lower.startswith("турнир"):
+            if not self.db.is_admin(update.effective_user.id):
+                await update.message.reply_text("❌ Команда доступна только админам.")
+                return
+            parsed = self._parse_tournament_alias(body[len("турнир"):].strip())
+            if not parsed:
+                await update.message.reply_text("Использование: +турнир [название] [format]")
+                return
+            await self._call_with_args(self.cmd_create_tournament, update, context, parsed)
+            return
+
+        admin_aliases = {
+            "+старт": self.cmd_start_tournament,
+            "+завершить": self.cmd_end_tournament,
+            "+по": self.cmd_playoff,
+            "-поматч": self.cmd_undo_playoff,
+            "-матч": self.cmd_cancel_match,
+            "+замена": self.cmd_replace,
+            "-участник": self.cmd_remove_player,
+        }
+
+        if body_lower in {"старт", "завершить", "по"}:
+            if not self.db.is_admin(update.effective_user.id):
+                await update.message.reply_text("❌ Команда доступна только админам.")
+                return
+            handler = {
+                "старт": self.cmd_start_tournament,
+                "завершить": self.cmd_end_tournament,
+                "по": self.cmd_playoff,
+            }[body_lower]
+            await self._call_with_args(handler, update, context, [])
+            return
+
+        if body_lower.startswith("поматч"):
+            if not self.db.is_admin(update.effective_user.id):
+                await update.message.reply_text("❌ Команда доступна только админам.")
+                return
+            args = body[len("поматч"):].strip().split()
+            if len(args) < 2:
+                await update.message.reply_text("Использование: -ПОматч [стадия] [№]")
+                return
+            await self._call_with_args(self.cmd_undo_playoff, update, context, args[:2])
+            return
+
+        if body_lower.startswith("матч"):
+            if not self.db.is_admin(update.effective_user.id):
+                await update.message.reply_text("❌ Команда доступна только админам.")
+                return
+            args = body[len("матч"):].strip().split(maxsplit=1)
+            if not args:
+                await update.message.reply_text("Использование: -матч <match_id>")
+                return
+            await self._call_with_args(self.cmd_cancel_match, update, context, [args[0]])
+            return
+
+        if body_lower.startswith("замена"):
+            if not self.db.is_admin(update.effective_user.id):
+                await update.message.reply_text("❌ Команда доступна только админам.")
+                return
+            args = body[len("замена"):].strip().split(maxsplit=1)
+            if len(args) < 2:
+                await update.message.reply_text("Использование: +замена [old] [new]")
+                return
+            await self._call_with_args(self.cmd_replace, update, context, args)
+            return
+
+        if body_lower.startswith("участник"):
+            if not self.db.is_admin(update.effective_user.id):
+                await update.message.reply_text("❌ Команда доступна только админам.")
+                return
+            nick = body[len("участник"):].strip()
+            if not nick:
+                await update.message.reply_text("Использование: -участник <nick>")
+                return
+            await self._call_with_args(self.cmd_remove_player, update, context, [nick])
+            return
+
+        await update.message.reply_text("Неизвестная команда. Используй: vsa команды")
+
+    async def handle_freeform_commands(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not update.message or not update.message.text:
+            return
+
+        text = update.message.text.strip()
+        if not text:
+            return
+
+        lower = text.casefold()
+        if lower.startswith("вса "):
+            await self._handle_vsa_command(update, context, text[4:])
+            return
+
+        if lower.startswith("+ рез"):
+            return
+
+        await self._handle_admin_freeform_command(update, context, text)
+
     async def handle_results_topic_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.db.is_admin(update.effective_user.id):
             await update.message.reply_text("❌ Команда доступна только админам.")
@@ -2072,43 +2228,28 @@ class TournamentBot:
             return
         
         text = (
-            "👑 ПАНЕЛЬ АДМИНИСТРАТОРА\n\n"
             "⚙️ Управление турниром:\n"
-            "/tournament_create Название [формат] - создать турнир\n"
-            "/tournament_start - начать турнир\n"
-            "/tournament_end - завершить турнир\n"
-            "/refreshreg - обновить пост регистрации\n"
-            "/regen_matches [ID] - пересоздать матчи\n\n"
-            "🎮 Результаты матчей:\n"
-            "/gresult Player1 13-10 Player2 - результат вручную\n"
-            "+ рез Player1 13-10 Player2 - результат текстом\n"
-            "/rewrite Player1 13-10 Player2 - перезаписать матч\n"
-            "/cancelmatch <match_id> - отмена матча\n"
-            "/tp [ник] - техническое поражение\n\n"
-            "👥 Управление игроками:\n"
-            "/replace [old] [new] - замена игрока\n"
-            "/removeplayer <nick> - удалить участника\n"
-            "/notifyall - пинг по регистрации\n\n"
+            "+турнир Название format - создать\n"
+            "+старт - начать\n"
+            "+завершить - за��ершить\n"
+            "refreshreg - обновить пост\n\n"
+            "🎮 Результаты:\n"
+            "+рез Player1 13-10 Player2\n"
+            "+замена old new - замена\n"
+            "-матч ID - отмена\n"
+            "тп ник - тех.поражение\n\n"
+            "👥 Игроки:\n"
+            "-участник ник - удалить\n\n"
             "🏆 Плей-офф:\n"
-            "/playoff [ники...] - генерация сетки\n"
-            "/pw [стадия] [№] [ник] [счёт] - результат\n"
-            "/undo_playoff [стадия] [№] - откатить результат\n\n"
-            "📊 Визуал и таблицы:\n"
-            "/gtable - таблица групп (текст)\n"
-            "/pbracket - сетка плей-офф (текст)\n"
-            "/resend_groups - переотправить таблицу\n\n"
-            "📈 Аналитика:\n"
-            "/elo - таблица рейтинга\n"
-            "/tinfo [ID] - информация по турниру\n"
-            "/finalpost [ID] - финальный пост\n"
-            "/dbstats - статистика базы\n"
-            "/resetelo - сбросить ELO до 1000\n"
-            "/allmatches - все оставшиеся матчи\n\n"
-            "👤 Пользовательские команды:\n"
-            "!nick [ник] - установить ник\n"
-            "!profile - профиль и статистика\n"
-            "!matches - мои матчи\n"
-            "!commands - список команд"
+            "+по - создать сетку\n"
+            "pw стадия № счёт - результат\n"
+            "-поматч стадия № - откатить\n\n"
+            "📊 Таблицы:\n"
+            "gtable - группа\n"
+            "elo - рейтинг\n"
+            "tinfo ID - инфо\n"
+            "allmatches - матчи\n\n"
+            "вса команды - все команды"
         )
         await update.message.reply_text(text)
 
