@@ -5,7 +5,6 @@ FC Mobile Tournament Bot - PostgreSQL версия
 
 import os
 import logging
-import sqlite3
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -39,22 +38,16 @@ AVAILABLE_FORMATS: Dict[str, TournamentFormat] = {
 class Database:
     def __init__(self):
         self._database_url = os.getenv("DATABASE_URL")
-        self._use_postgres = bool(self._database_url)
-        if self._use_postgres:
-            self._reconnect()
-        else:
-            self.conn = sqlite3.connect(
-                os.getenv("DB_PATH", "tournament_bot.db"), 
-                check_same_thread=False
-            )
+        if not self._database_url:
+            raise ValueError("DATABASE_URL is required for PostgreSQL database connection")
+        self._reconnect()
         self._raw_cursor = self.conn.cursor()
         self.create_tables()
     
     def _reconnect(self):
-        if self._use_postgres:
-            self.conn = psycopg2.connect(self._database_url, cursor_factory=RealDictCursor)
-            self._raw_cursor = self.conn.cursor()
-            logger.info("Database reconnected successfully")
+        self.conn = psycopg2.connect(self._database_url, cursor_factory=RealDictCursor)
+        self._raw_cursor = self.conn.cursor()
+        logger.info("Database reconnected successfully")
     
     def _execute_with_retry(self, query: str, params: tuple = None, retry_count: int = 3):
         for attempt in range(retry_count):
